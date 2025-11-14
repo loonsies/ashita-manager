@@ -2,3 +2,4 @@
 .vscode
 .github
 *.pyc
+ashita_packages.json
