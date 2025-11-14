@@ -24,3 +24,22 @@
 - Use the Addons/Plugins tabs to update, remove, open repository, or view README
 - Open the Scripts tab to edit your Ashite script: toggle items, reorder, and save
 
+## Run from Source
+```powershell
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the app
+python ashita_manager.py
+```
+
+## Build to EXE
+```powershell
+# Install dependencies (including PyInstaller)
+pip install -r requirements.txt
+
+# Build standalone EXE
+python -m PyInstaller --onefile --windowed --name "Ashita Package Manager" --icon assets/logo.ico --add-data "assets:assets" ashita_manager.py
+```
+
+The compiled .exe will be in the `dist/` folder as `Ashita Package Manager.exe`.

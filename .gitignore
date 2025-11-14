@@ -1,5 +1,11 @@
 .zed
 .vscode
-.github
 *.pyc
 ashita_packages.json
+
+# PyInstaller
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.spec
