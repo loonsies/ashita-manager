@@ -35,7 +35,7 @@ class PackageManager:
     
     def _handle_remove_readonly(self, func, path, exc):
         """Error handler for Windows file deletion issues"""
-        # Handle readonly and locked files (especially in .git folders)
+        # Handle readonly and locked files
         try:
             os.chmod(path, stat.S_IWRITE)
             func(path)
@@ -83,7 +83,7 @@ class PackageManager:
         # Default to main if detection fails
         return 'main'
     
-    def install_from_git(self, url, pkg_type, target_package_name=None, branch=None):
+    def install_from_git(self, url, pkg_type, target_package_name=None, branch=None, force=False):
         """Install a package by cloning from git
         
         Args:
@@ -91,6 +91,7 @@ class PackageManager:
             pkg_type: 'addon' or 'plugin'
             target_package_name: Optional specific package name to extract (for monorepos)
             branch: Optional specific branch to clone (defaults to repo's default)
+            force: Skip conflict checking if True
         """
         try:
             # Create temporary directory for cloning
@@ -98,7 +99,7 @@ class PackageManager:
                 temp_path = Path(temp_dir)
                 
                 # Build clone command with optional branch
-                clone_cmd = ['git', 'clone']
+                clone_cmd = ['git', 'clone', '--recurse-submodules']
                 if branch:
                     clone_cmd.extend(['--branch', branch])
                 clone_cmd.extend([url, str(temp_path / 'repo')])
@@ -139,38 +140,75 @@ class PackageManager:
                     all_addons = self.detector.detect_all_addons(repo_path)
                     
                     if len(all_addons) > 1:
+                        # Monorepo - check for conflicts first if not forcing
+                        if not force:
+                            all_conflicts = {}
+                            has_conflicts = False
+                            
+                            for addon_info in all_addons:
+                                addon_name = addon_info['name']
+                                conflicts = self._check_file_conflicts(repo_path, addon_name, url)
+                                if conflicts['libs'] or conflicts['docs'] or conflicts['resources']:
+                                    all_conflicts[addon_name] = conflicts
+                                    has_conflicts = True
+                            
+                            if has_conflicts:
+                                # Return combined conflict info for all addons
+                                return {
+                                    'success': False, 
+                                    'error': 'File conflicts detected in monorepo addons', 
+                                    'conflicts': all_conflicts, 
+                                    'requires_confirmation': True,
+                                    'monorepo': True,
+                                    'all_addons': all_addons
+                                }
+                        
                         # Monorepo - install all addons
                         installed_count = 0
                         failed = []
+                        warnings = []
                         
                         for addon_info in all_addons:
                             result = self._install_single_addon(
-                                addon_info, url, commit_hash, branch_name, None, repo_path
+                                addon_info, url, commit_hash, branch_name, None, repo_path, force=force
                             )
                             if result['success']:
                                 installed_count += 1
+                                if 'warnings' in result['message']:
+                                    warnings.append(f"{addon_info['name']}: {result['message']}")
                             else:
                                 failed.append(f"{addon_info['name']}: {result['error']}")
+                        
+                        # Save once after all addons are installed
+                        self.package_tracker.save_packages()
                         
                         if installed_count > 0:
                             msg = f"Installed {installed_count} addon(s) from monorepo"
                             if failed:
                                 msg += f" ({len(failed)} failed)"
+                                for failure in failed:
+                                    msg += f"\n{failure}"
+                            if warnings:
+                                for warning in warnings:
+                                    msg += f"\n{warning}"
                             return {'success': True, 'message': msg}
                         else:
-                            return {'success': False, 'error': f"Failed to install addons: {'; '.join(failed)}"}
+                            error_msg = "Failed to install addons:"
+                            for failure in failed:
+                                error_msg += f"\n{failure}"
+                            return {'success': False, 'error': error_msg}
                     else:
                         # Single addon
-                        result = self._install_addon(repo_path, url, commit_hash, branch_name, None, target_package_name)
+                        result = self._install_addon(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force)
                 else:
-                    result = self._install_plugin(repo_path, url, commit_hash, branch_name, None, target_package_name)
+                    result = self._install_plugin(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force)
                 
                 return result
                 
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def install_from_release(self, url, pkg_type):
+    def install_from_release(self, url, pkg_type, force=False):
         try:
             release_url = self._get_latest_release_url(url)
             
@@ -198,16 +236,16 @@ class PackageManager:
                 release_tag = self._get_release_tag(url)
                 
                 if pkg_type == 'addon':
-                    result = self._install_addon(extract_path, url, None, None, release_tag)
+                    result = self._install_addon(extract_path, url, None, None, release_tag, force=force)
                 else:
-                    result = self._install_plugin(extract_path, url, None, None, release_tag)
+                    result = self._install_plugin(extract_path, url, None, None, release_tag, force=force)
                 
                 return result
                 
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def _install_single_addon(self, addon_info, url, commit_hash=None, branch_name=None, release_tag=None, repo_root=None):
+    def _install_single_addon(self, addon_info, url, commit_hash=None, branch_name=None, release_tag=None, repo_root=None, force=False):
         """Install a single addon from addon_info dict (used for monorepos)"""
         try:
             addon_name = addon_info['name']
@@ -222,10 +260,16 @@ class PackageManager:
                 else:
                     return {'success': False, 'error': f'Addon "{addon_name}" already exists'}
             
+            # Check for file conflicts (will skip conflicts from same repository unless force is False)
+            if repo_root and not force:
+                conflicts = self._check_file_conflicts(repo_root, addon_name, url)
+                if conflicts['libs'] or conflicts['docs'] or conflicts['resources']:
+                    return {'success': False, 'error': 'File conflicts detected', 'conflicts': conflicts, 'requires_confirmation': True}
+            
             # Copy addon files
             shutil.copytree(addon_source, target_dir)
             
-            # Track package FIRST (so _copy_extra_folders can update it)
+            # Track package
             install_method = 'git' if commit_hash else 'release'
             package_info = {
                 'source': url,
@@ -258,16 +302,21 @@ class PackageManager:
             
             self.package_tracker.add_package(addon_name, 'addon', package_info)
             
-            # Copy extra folders (libs, etc.) - this will update package_info with lib_files
+            # Copy extra folders (libs, docs, resources)
+            extra_errors = []
             if repo_root:
-                self._copy_extra_folders(repo_root, addon_name, is_monorepo=True)
+                extra_errors = self._copy_extra_folders(repo_root, addon_name, pkg_type='addon', is_monorepo=True)
             
-            return {'success': True, 'message': f'Addon "{addon_name}" installed successfully'}
+            msg = f'Addon "{addon_name}" installed successfully'
+            if extra_errors:
+                msg += f' (with warnings: {"; ".join(extra_errors)})'
+            
+            return {'success': True, 'message': msg}
             
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def _install_addon(self, source_path, url, commit_hash=None, branch_name=None, release_tag=None, target_name=None):
+    def _install_addon(self, source_path, url, commit_hash=None, branch_name=None, release_tag=None, target_name=None, force=False):
         try:
             repo_root = source_path
             addon_info = self.detector.detect_addon_structure(source_path, target_name)
@@ -287,12 +336,16 @@ class PackageManager:
                 else:
                     return {'success': False, 'error': f'Addon "{addon_name}" already exists'}
             
+            # Check for file conflicts (will skip conflicts from same repository unless force is False)
+            if not force:
+                conflicts = self._check_file_conflicts(repo_root, addon_name, url)
+                if conflicts['libs'] or conflicts['docs'] or conflicts['resources']:
+                    return {'success': False, 'error': 'File conflicts detected', 'conflicts': conflicts, 'requires_confirmation': True}
+            
             if addon_info['structure'] == 'root':
                 shutil.copytree(addon_source, target_dir)
             else:
                 shutil.copytree(addon_source, target_dir)
-            
-            self._copy_extra_folders(repo_root, addon_name)
             
             # Track package
             install_method = 'git' if commit_hash else 'release'
@@ -304,7 +357,7 @@ class PackageManager:
             }
             
             if commit_hash:
-                # For monorepos (like official repo), get folder-specific commit
+                # For monorepos, get folder-specific commit
                 if url == self.official_repo:
                     folder_path = f'addons/{addon_name}'
                     folder_commit_result = subprocess.run(
@@ -327,12 +380,16 @@ class PackageManager:
             
             self.package_tracker.add_package(addon_name, 'addon', package_info)
             
+            # Copy extra folders (libs, docs, resources)
+            self._copy_extra_folders(repo_root, addon_name, pkg_type='addon')
+            self.package_tracker.save_packages()
+            
             return {'success': True, 'message': f'Addon "{addon_name}" installed successfully'}
             
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def _install_plugin(self, source_path, url, commit_hash=None, branch_name=None, release_tag=None, target_name=None):
+    def _install_plugin(self, source_path, url, commit_hash=None, branch_name=None, release_tag=None, target_name=None, force=False):
         try:
             repo_root = source_path
             plugin_info = self.detector.detect_plugin_structure(source_path, target_name)
@@ -349,11 +406,9 @@ class PackageManager:
                 if existing_pkg and existing_pkg.get('source') == self.official_repo and url == self.official_repo:
                     target_dll.unlink()
                 else:
-                    return {'success': False, 'error': f'Plugin "{plugin_name}" already exists'}
+                    return {'success': False, 'error': f'Plugin "{plugin_name}.dll" already exists'}
             
             shutil.copy2(plugin_info['dll_path'], target_dll)
-            
-            self._copy_extra_folders(repo_root, plugin_name)
             
             # Track package
             install_method = 'git' if commit_hash else 'release'
@@ -365,7 +420,7 @@ class PackageManager:
             }
             
             if commit_hash:
-                # For monorepos (like official repo), get folder-specific commit
+                # For monorepos, get folder-specific commit
                 if url == self.official_repo:
                     # For plugins, the path in git is to the dll file
                     folder_path = f'plugins/{plugin_name}.dll'
@@ -389,79 +444,195 @@ class PackageManager:
             
             self.package_tracker.add_package(plugin_name, 'plugin', package_info)
             
+            # Copy extra folders (docs, resources) - this will update package_info
+            self._copy_extra_folders(repo_root, plugin_name, pkg_type='plugin')
+            self.package_tracker.save_packages()
+            
             return {'success': True, 'message': f'Plugin "{plugin_name}" installed successfully'}
             
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def _copy_extra_folders(self, source_path, package_name, is_monorepo=False):
+    def _check_file_conflicts(self, source_path, package_name, source_url=None):
+        """Check for file conflicts in libs/docs/resources folders. Returns dict with conflict info.
+        
+        Args:
+            source_path: Path to the repository being installed
+            package_name: Name of the package being installed
+            source_url: URL of the repository (used to check if conflicts are from same repo)
+        """
         source_path = Path(source_path)
+        conflicts = {'libs': [], 'docs': False, 'resources': False}
+        
+        # Check libs conflicts
+        libs_source = source_path / 'addons' / 'libs'
+        if libs_source.exists() and libs_source.is_dir():
+            libs_target = self.addons_dir / 'libs'
+            if libs_target.exists():
+                for item in libs_source.rglob('*'):
+                    if item.is_file():
+                        rel_path = item.relative_to(libs_source)
+                        target_file = libs_target / rel_path
+                        if target_file.exists():
+                            # Check if owned by another package
+                            owner = None
+                            owner_source = None
+                            all_packages = self.package_tracker.get_all_packages()
+                            for pkg_name, pkg_info in all_packages.get('addons', {}).items():
+                                if pkg_name != package_name and 'lib_files' in pkg_info:
+                                    if str(rel_path) in pkg_info['lib_files']:
+                                        owner = pkg_name
+                                        owner_source = pkg_info.get('source')
+                                        break
+                            
+                            # Only report conflict if from a different repository
+                            if owner and owner_source != source_url:
+                                conflicts['libs'].append({'file': str(rel_path), 'owner': owner, 'owner_source': owner_source})
+        
+        # Check docs conflicts
+        for docs_loc in [source_path / 'docs', source_path / 'Docs']:
+            if docs_loc.exists():
+                target_docs = self.docs_dir / package_name
+                if target_docs.exists():
+                    conflicts['docs'] = True
+                break
+        
+        # Check resources conflicts
+        for res_loc in [source_path / 'resources', source_path / 'Resources']:
+            if res_loc.exists():
+                resources_dir = self.ashita_root / 'resources'
+                target_resources = resources_dir / package_name
+                if target_resources.exists():
+                    conflicts['resources'] = True
+                break
+        
+        return conflicts
+    
+    def _copy_extra_folders(self, source_path, package_name, pkg_type='addon', is_monorepo=False):
+        source_path = Path(source_path)
+        errors = []
         
         has_addons_folder = (source_path / 'addons').exists()
         has_plugins_folder = (source_path / 'plugins').exists()
         is_multi_folder_repo = has_addons_folder or has_plugins_folder
         
         if not is_multi_folder_repo:
-            return
+            return errors
         
-        # Handle libs folder - MERGE instead of replace for monorepos
-        libs_source = source_path / 'addons' / 'libs'
-        if libs_source.exists() and libs_source.is_dir():
-            libs_target = self.addons_dir / 'libs'
-            libs_target.mkdir(exist_ok=True)
+        try:
+            # Handle libs folder
+            libs_source = source_path / 'addons' / 'libs'
+            if libs_source.exists() and libs_source.is_dir():
+                libs_target = self.addons_dir / 'libs'
+                libs_target.mkdir(exist_ok=True, parents=True)
+                
+                # Track which lib files belong to this package
+                lib_files = []
+                
+                # Copy/merge libs files
+                for item in libs_source.rglob('*'):
+                    if item.is_file():
+                        rel_path = item.relative_to(libs_source)
+                        target_file = libs_target / rel_path
+                        
+                        # Create parent directories if needed
+                        target_file.parent.mkdir(parents=True, exist_ok=True)
+                        
+                        # Copy the file
+                        shutil.copy2(item, target_file)
+                        
+                        # Track this file for this package
+                        lib_files.append(str(rel_path))
+                
+                # Store lib files in package metadata
+                if lib_files:
+                    pkg = self.package_tracker.get_package(package_name, 'addon')
+                    if pkg:
+                        pkg['lib_files'] = lib_files
+        except Exception as e:
+            errors.append(f"Error copying libs: {e}")
+        
+        try:
+            # Track docs files
+            package_docs_locations = [
+                source_path / 'docs',
+                source_path / 'Docs',
+            ]
             
-            # Track which lib files belong to this package
-            lib_files = []
+            doc_files = []
+            for docs_location in package_docs_locations:
+                if docs_location.exists() and docs_location.is_dir():
+                    target_docs = self.docs_dir / package_name
+                    
+                    # Check if docs folder already contains a subfolder with the package name
+                    package_subfolder = docs_location / package_name
+                    package_subfolder_lower = docs_location / package_name.lower()
+                    package_subfolder_upper = docs_location / package_name.upper()
+                    package_subfolder_title = docs_location / package_name.title()
+                    
+                    source_to_copy = None
+                    if package_subfolder.exists() and package_subfolder.is_dir():
+                        source_to_copy = package_subfolder
+                    elif package_subfolder_lower.exists() and package_subfolder_lower.is_dir():
+                        source_to_copy = package_subfolder_lower
+                    elif package_subfolder_upper.exists() and package_subfolder_upper.is_dir():
+                        source_to_copy = package_subfolder_upper
+                    elif package_subfolder_title.exists() and package_subfolder_title.is_dir():
+                        source_to_copy = package_subfolder_title
+                    else:
+                        # No package subfolder found, copy entire docs folder
+                        source_to_copy = docs_location
+                    
+                    if target_docs.exists():
+                        self._remove_directory_safe(target_docs)
+                    shutil.copytree(source_to_copy, target_docs)
+                    
+                    # Track all copied docs files
+                    for item in source_to_copy.rglob('*'):
+                        if item.is_file():
+                            rel_path = item.relative_to(source_to_copy)
+                            doc_files.append(str(rel_path))
+                    break
             
-            # Copy/merge libs files
-            for item in libs_source.rglob('*'):
-                if item.is_file():
-                    rel_path = item.relative_to(libs_source)
-                    target_file = libs_target / rel_path
-                    
-                    # Create parent directories if needed
-                    target_file.parent.mkdir(parents=True, exist_ok=True)
-                    
-                    # Copy the file
-                    shutil.copy2(item, target_file)
-                    
-                    # Track this file for this package
-                    lib_files.append(str(rel_path))
-            
-            # Store lib files in package metadata
-            if lib_files:
-                pkg = self.package_tracker.get_package(package_name, 'addon')
+            if doc_files:
+                pkg = self.package_tracker.get_package(package_name, pkg_type)
                 if pkg:
-                    pkg['lib_files'] = lib_files
-                    self.package_tracker.save()
+                    pkg['doc_files'] = doc_files
+        except Exception as e:
+            errors.append(f"Error copying docs: {e}")
         
-        package_docs_locations = [
-            source_path / 'docs',
-            source_path / 'Docs',
-        ]
+        try:
+            # Track resource files
+            package_resources_locations = [
+                source_path / 'resources',
+                source_path / 'Resources',
+            ]
+            
+            resource_files = []
+            for res_location in package_resources_locations:
+                if res_location.exists() and res_location.is_dir():
+                    resources_dir = self.ashita_root / 'resources'
+                    resources_dir.mkdir(exist_ok=True, parents=True)
+                    target_resources = resources_dir / package_name
+                    if target_resources.exists():
+                        self._remove_directory_safe(target_resources)
+                    shutil.copytree(res_location, target_resources)
+                    
+                    # Track all copied resource files
+                    for item in res_location.rglob('*'):
+                        if item.is_file():
+                            rel_path = item.relative_to(res_location)
+                            resource_files.append(str(rel_path))
+                    break
+            
+            if resource_files:
+                pkg = self.package_tracker.get_package(package_name, pkg_type)
+                if pkg:
+                    pkg['resource_files'] = resource_files
+        except Exception as e:
+            errors.append(f"Error copying resources: {e}")
         
-        for docs_location in package_docs_locations:
-            if docs_location.exists() and docs_location.is_dir():
-                target_docs = self.docs_dir / package_name
-                if target_docs.exists():
-                    self._remove_directory_safe(target_docs)
-                shutil.copytree(docs_location, target_docs)
-                break
-        
-        package_resources_locations = [
-            source_path / 'resources',
-            source_path / 'Resources',
-        ]
-        
-        for res_location in package_resources_locations:
-            if res_location.exists() and res_location.is_dir():
-                resources_dir = self.ashita_root / 'resources'
-                resources_dir.mkdir(exist_ok=True)
-                target_resources = resources_dir / package_name
-                if target_resources.exists():
-                    self._remove_directory_safe(target_resources)
-                shutil.copytree(res_location, target_resources)
-                break
+        return errors
     
     def _get_latest_release_url(self, repo_url):
         try:
@@ -556,7 +727,7 @@ class PackageManager:
             if not source_url:
                 return {'success': False, 'error': 'Package source URL not found'}
             
-            # Check if package is already up-to-date (for git installations)
+            # Check if package is already up-to-date
             if install_method == 'git' and current_commit:
                 repo_path = None
                 if source_url == self.official_repo:
@@ -602,10 +773,8 @@ class PackageManager:
                         backup_path.unlink()
                     shutil.move(str(target_dll), str(backup_path))
             
-            # Try to reinstall with branch for official repo
             try:
                 if install_method == 'git':
-                    # Use detected branch if it's the official repo
                     branch = self.official_repo_branch if source_url == self.official_repo else None
                     result = self.install_from_git(source_url, pkg_type, target_package_name=package_name, branch=branch)
                 else:
@@ -757,39 +926,96 @@ class PackageManager:
                 if target_dir.exists():
                     self._remove_directory_safe(target_dir)
                 
-                # Remove tracked lib files
+                # Remove tracked lib files (only if no other addon uses them)
                 if 'lib_files' in package_info:
                     libs_dir = self.addons_dir / 'libs'
+                    
+                    # Get all other addons and their lib files
+                    all_packages = self.package_tracker.get_all_packages()
+                    other_addon_lib_files = set()
+                    for other_name, other_info in all_packages.get('addons', {}).items():
+                        if other_name != package_name and 'lib_files' in other_info:
+                            other_addon_lib_files.update(other_info['lib_files'])
+                    
                     for lib_file in package_info['lib_files']:
-                        lib_path = libs_dir / lib_file
-                        if lib_path.exists():
-                            try:
-                                lib_path.unlink()
-                                # Remove empty parent directories
-                                parent = lib_path.parent
-                                while parent != libs_dir and parent.exists():
-                                    try:
-                                        parent.rmdir()  # Only removes if empty
-                                        parent = parent.parent
-                                    except OSError:
-                                        break
-                            except Exception:
-                                pass  # Continue even if file removal fails
+                        # Only remove if no other addon uses this file
+                        if lib_file not in other_addon_lib_files:
+                            lib_path = libs_dir / lib_file
+                            if lib_path.exists():
+                                try:
+                                    lib_path.unlink()
+                                    # Remove empty parent directories
+                                    parent = lib_path.parent
+                                    while parent != libs_dir and parent.exists():
+                                        try:
+                                            parent.rmdir()  # Only removes if empty
+                                            parent = parent.parent
+                                        except OSError:
+                                            break
+                                except Exception:
+                                    pass  # Continue even if file removal fails
             else:
                 target_dll = self.plugins_dir / f"{package_name}.dll"
                 if target_dll.exists():
                     target_dll.unlink()
             
-            # Remove docs if they exist
-            docs_path = self.docs_dir / package_name
-            if docs_path.exists():
-                self._remove_directory_safe(docs_path)
+            # Remove tracked docs files (only if no other package uses them)
+            if 'doc_files' in package_info:
+                docs_base = self.docs_dir / package_name
+                
+                # Get all other packages and their docs files
+                all_packages = self.package_tracker.get_all_packages()
+                other_doc_files = set()
+                for pkg_type_name in ['addons', 'plugins']:
+                    for other_name, other_info in all_packages.get(pkg_type_name, {}).items():
+                        if other_name != package_name and 'doc_files' in other_info:
+                            other_doc_files.update(other_info['doc_files'])
+                
+                for doc_file in package_info['doc_files']:
+                    # Only remove if no other package uses this file
+                    if doc_file not in other_doc_files:
+                        doc_path = docs_base / doc_file
+                        if doc_path.exists():
+                            try:
+                                doc_path.unlink()
+                            except Exception:
+                                pass
+                
+                # Remove empty docs directory
+                if docs_base.exists():
+                    try:
+                        docs_base.rmdir()
+                    except OSError:
+                        pass  # Directory not empty, keep it
             
-            # Remove resources if they exist
-            resources_dir = self.ashita_root / 'resources'
-            resources_path = resources_dir / package_name
-            if resources_path.exists():
-                self._remove_directory_safe(resources_path)
+            # Remove tracked resource files (only if no other package uses them)
+            if 'resource_files' in package_info:
+                resources_base = self.ashita_root / 'resources' / package_name
+                
+                # Get all other packages and their resource files
+                all_packages = self.package_tracker.get_all_packages()
+                other_resource_files = set()
+                for pkg_type_name in ['addons', 'plugins']:
+                    for other_name, other_info in all_packages.get(pkg_type_name, {}).items():
+                        if other_name != package_name and 'resource_files' in other_info:
+                            other_resource_files.update(other_info['resource_files'])
+                
+                for resource_file in package_info['resource_files']:
+                    # Only remove if no other package uses this file
+                    if resource_file not in other_resource_files:
+                        resource_path = resources_base / resource_file
+                        if resource_path.exists():
+                            try:
+                                resource_path.unlink()
+                            except Exception:
+                                pass
+                
+                # Remove empty resources directory
+                if resources_base.exists():
+                    try:
+                        resources_base.rmdir()
+                    except OSError:
+                        pass  # Directory not empty, keep it
             
             # Remove from tracker
             self.package_tracker.remove_package(package_name, pkg_type)
@@ -877,12 +1103,10 @@ class PackageManager:
                 
                 repo_path = temp_path / 'repo'
                 
-                # Try to detect plugin first (more specific - .dll files)
                 plugin_info = self.detector.detect_plugin_structure(repo_path)
                 if plugin_info['found']:
                     return 'plugin'
                 
-                # Then try to detect addon (.lua files)
                 addon_info = self.detector.detect_addon_structure(repo_path)
                 if addon_info['found']:
                     return 'addon'

@@ -24,8 +24,9 @@ class FolderStructureDetector:
         source_path = Path(source_path)
         addons = []
         
-        # First, check if there's a single subdirectory (common for extracted zips)
-        subdirs = [d for d in source_path.iterdir() if d.is_dir()]
+        # First, check if there's a single subdirectory
+        # Exclude .git and other hidden folders from this check
+        subdirs = [d for d in source_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
         if len(subdirs) == 1:
             actual_source = subdirs[0]
         else:
@@ -34,7 +35,7 @@ class FolderStructureDetector:
         # Check for 'addons' folder in the structure
         addons_folder = actual_source / 'addons'
         if addons_folder.exists() and addons_folder.is_dir():
-            # Find ALL addon folders inside
+            # Find all addon folders inside
             for addon_dir in addons_folder.iterdir():
                 if addon_dir.is_dir() and addon_dir.name != 'libs':
                     # Check if main .lua file exists
@@ -76,8 +77,9 @@ class FolderStructureDetector:
         """
         source_path = Path(source_path)
         
-        # First, check if there's a single subdirectory (common for extracted zips)
-        subdirs = [d for d in source_path.iterdir() if d.is_dir()]
+        # First, check if there's a single subdirectory
+        # Exclude .git and other hidden folders from this check
+        subdirs = [d for d in source_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
         if len(subdirs) == 1:
             # Check inside the single subdirectory
             actual_source = subdirs[0]
@@ -160,8 +162,9 @@ class FolderStructureDetector:
         """
         source_path = Path(source_path)
         
-        # First, check if there's a single subdirectory (common for extracted zips)
-        subdirs = [d for d in source_path.iterdir() if d.is_dir()]
+        # First, check if there's a single subdirectory
+        # Exclude .git and other hidden folders from this check
+        subdirs = [d for d in source_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
         if len(subdirs) == 1:
             # Check inside the single subdirectory
             actual_source = subdirs[0]
@@ -248,8 +251,6 @@ class FolderStructureDetector:
         docs_locations = [
             source_path / 'docs',
             source_path / 'Docs',
-            source_path / 'doc',
-            source_path / 'Doc'
         ]
         
         for location in docs_locations:
@@ -266,8 +267,6 @@ class FolderStructureDetector:
         resources_locations = [
             source_path / 'resources',
             source_path / 'Resources',
-            source_path / 'res',
-            source_path / 'Res'
         ]
         
         for location in resources_locations:

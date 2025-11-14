@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/sindresorhus/github-markdown-css@5/github-markdown.css">
+    <script src="qrc:/qtwebchannel/qwebchannel.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/lib/marked.umd.js"></script>
+    <style>
+        body {
+            padding: 20px;
+        }
+    </style>
+</head>
+
+<body class="markdown-body">
+    <div id="content"></div>
+    <script>
+        new QWebChannel(qt.webChannelTransport, function (channel) {
+            var content = channel.objects.content;
+
+            function render(text) {
+                if (typeof marked !== 'undefined') {
+                    document.getElementById('content').innerHTML = marked.parse(text);
+                } else {
+                    document.getElementById('content').textContent = text;
+                }
+            }
+
+            if (content.text) render(content.text);
+            content.textChanged.connect(render);
+        });
+    </script>
+</body>
+
+</html>

@@ -10,9 +10,20 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QComboBox, QListWidget, QListWidgetItem, QTabWidget,
                              QMessageBox, QProgressDialog, QGroupBox, QTextEdit,
                              QDialog, QDialogButtonBox, QFormLayout, QFileDialog,
-                             QSpinBox, QCheckBox, QScrollArea, QInputDialog, QStyle)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QByteArray, QBuffer
-from PyQt6.QtGui import QFont, QIcon
+                             QSpinBox, QCheckBox, QScrollArea, QInputDialog, QStyle,
+                             QTreeWidget, QTreeWidgetItem)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QByteArray, QBuffer, QUrl, QCoreApplication, QTimer
+from PyQt6.QtGui import QFont, QIcon, QGuiApplication
+
+# Try to import WebEngine for markdown rendering
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from PyQt6.QtWebEngineCore import QWebEnginePage
+    from markdown_viewer import MarkdownViewer
+    WEBENGINE_AVAILABLE = True
+except ImportError:
+    WEBENGINE_AVAILABLE = False
+
 import qdarktheme
 from package_manager import PackageManager
 from package_tracker import PackageTracker
@@ -22,27 +33,31 @@ from script_parser import ScriptParser
 class InstallWorker(QThread):
     """Worker thread for package installation"""
     finished = pyqtSignal(bool, str)
+    conflict_detected = pyqtSignal(dict)
     progress = pyqtSignal(str)
     
-    def __init__(self, package_manager, url, pkg_type, install_method, branch=None):
+    def __init__(self, package_manager, url, pkg_type, install_method, branch=None, force=False):
         super().__init__()
         self.package_manager = package_manager
         self.url = url
         self.pkg_type = pkg_type
         self.install_method = install_method
         self.branch = branch
+        self.force = force
     
     def run(self):
         try:
             if self.install_method == "Clone":
                 self.progress.emit(f"Cloning repository from {self.url}...")
-                result = self.package_manager.install_from_git(self.url, self.pkg_type, branch=self.branch)
+                result = self.package_manager.install_from_git(self.url, self.pkg_type, branch=self.branch, force=self.force)
             else:  # Release
                 self.progress.emit(f"Downloading release from {self.url}...")
-                result = self.package_manager.install_from_release(self.url, self.pkg_type)
+                result = self.package_manager.install_from_release(self.url, self.pkg_type, force=self.force)
             
             if result['success']:
                 self.finished.emit(True, result['message'])
+            elif result.get('requires_confirmation'):
+                self.conflict_detected.emit(result)
             else:
                 self.finished.emit(False, result['error'])
         except Exception as e:
@@ -51,7 +66,7 @@ class InstallWorker(QThread):
 
 class UpdateWorker(QThread):
     """Worker thread for package update"""
-    finished = pyqtSignal(bool, str, bool)  # success, message, already_updated
+    finished = pyqtSignal(bool, str, bool)
     progress = pyqtSignal(str)
     
     def __init__(self, package_manager, package_name, pkg_type):
@@ -112,10 +127,12 @@ class BatchUpdateWorker(QThread):
                 if result.get('already_updated', False):
                     skipped += 1
                     self.log.emit(f"{package_name} already up-to-date")
+                else:
                     updated += 1
                     self.log.emit(f"{package_name} updated successfully")
+            else:
                 failed += 1
-                self.log.emit(f"{package_name} failed: {result['error']}")
+                self.log.emit(f"{package_name} failed: {result.get('error', 'Unknown error')}")
         self.finished.emit(updated, failed, skipped)
 
 
@@ -323,7 +340,6 @@ class AshitaManagerUI(QMainWindow):
         msg.setWindowTitle("First time setup")
         msg.setMinimumSize(420, 140)
         msg.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
-        # show and center the dialog so it isn't tiny or off-screen
         msg.show()
         self._center_widget(msg)
 
@@ -359,6 +375,11 @@ class AshitaManagerUI(QMainWindow):
         self.setWindowTitle("Ashita Package Manager")
         self.setGeometry(100, 100, 900, 700)
         
+        # Set application icon
+        icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'logo.png')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        
         # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -367,8 +388,7 @@ class AshitaManagerUI(QMainWindow):
         # Installation section
         install_group = QGroupBox("Install new package")
         install_layout = QVBoxLayout()
-        
-        # Single line with URL input and all controls
+
         url_layout = QHBoxLayout()
         url_layout.addWidget(QLabel("Git URL:"))
         self.url_input = QLineEdit()
@@ -419,7 +439,9 @@ class AshitaManagerUI(QMainWindow):
         self.addons_search.textChanged.connect(lambda: self.filter_packages("addon"))
         addons_layout.addWidget(self.addons_search)
         
-        self.addons_list = QListWidget()
+        self.addons_list = QTreeWidget()
+        self.addons_list.setHeaderHidden(True)
+        self.addons_list.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.addons_list.itemClicked.connect(self.show_package_info)
         addons_layout.addWidget(self.addons_list)
         
@@ -453,6 +475,20 @@ class AshitaManagerUI(QMainWindow):
         self.refresh_addon_btn.clicked.connect(self.refresh_package_lists)
         addon_buttons.addWidget(self.refresh_addon_btn)
         
+        self.open_addon_repo_btn = QPushButton("Open repository")
+        icon = self._std_icon('install')
+        if not icon.isNull():
+            self.open_addon_repo_btn.setIcon(icon)
+        self.open_addon_repo_btn.clicked.connect(lambda: self.open_repository("addon"))
+        addon_buttons.addWidget(self.open_addon_repo_btn)
+        
+        self.open_addon_readme_btn = QPushButton("Open README")
+        icon = self._std_icon('help')
+        if not icon.isNull():
+            self.open_addon_readme_btn.setIcon(icon)
+        self.open_addon_readme_btn.clicked.connect(lambda: self.open_readme("addon"))
+        addon_buttons.addWidget(self.open_addon_readme_btn)
+        
         addons_layout.addLayout(addon_buttons)
         self.tabs.addTab(addons_widget, "Addons (0)")
         
@@ -465,7 +501,9 @@ class AshitaManagerUI(QMainWindow):
         self.plugins_search.textChanged.connect(lambda: self.filter_packages("plugin"))
         plugins_layout.addWidget(self.plugins_search)
         
-        self.plugins_list = QListWidget()
+        self.plugins_list = QTreeWidget()
+        self.plugins_list.setHeaderHidden(True)
+        self.plugins_list.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.plugins_list.itemClicked.connect(self.show_package_info)
         plugins_layout.addWidget(self.plugins_list)
         
@@ -498,6 +536,20 @@ class AshitaManagerUI(QMainWindow):
             self.refresh_plugin_btn.setIcon(icon)
         self.refresh_plugin_btn.clicked.connect(self.refresh_package_lists)
         plugin_buttons.addWidget(self.refresh_plugin_btn)
+        
+        self.open_plugin_repo_btn = QPushButton("Open repository")
+        icon = self._std_icon('install')
+        if not icon.isNull():
+            self.open_plugin_repo_btn.setIcon(icon)
+        self.open_plugin_repo_btn.clicked.connect(lambda: self.open_repository("plugin"))
+        plugin_buttons.addWidget(self.open_plugin_repo_btn)
+        
+        self.open_plugin_readme_btn = QPushButton("Open README")
+        icon = self._std_icon('help')
+        if not icon.isNull():
+            self.open_plugin_readme_btn.setIcon(icon)
+        self.open_plugin_readme_btn.clicked.connect(lambda: self.open_readme("plugin"))
+        plugin_buttons.addWidget(self.open_plugin_readme_btn)
         
         plugins_layout.addLayout(plugin_buttons)
         self.tabs.addTab(plugins_widget, "Plugins (0)")
@@ -537,12 +589,21 @@ class AshitaManagerUI(QMainWindow):
         # Left: Plugins in Script
         self.script_plugins_group = QGroupBox("Plugins in script")
         plugins_group_layout = QVBoxLayout()
-        self.script_plugins_list = QListWidget()
+        
+        # Search bar for active plugins
+        self.script_plugins_search = QLineEdit()
+        self.script_plugins_search.setPlaceholderText("Search plugins in script...")
+        self.script_plugins_search.textChanged.connect(lambda: self.filter_script_list('plugin'))
+        plugins_group_layout.addWidget(self.script_plugins_search)
+        
+        self.script_plugins_list = QTreeWidget()
+        self.script_plugins_list.setHeaderHidden(True)
+        self.script_plugins_list.setRootIsDecorated(False)  # Remove indentation for flat list
         self.script_plugins_list.setMinimumHeight(200)
         plugins_group_layout.addWidget(self.script_plugins_list)
         
-        # Connect item change to update enabled state
-        self.script_plugins_list.itemChanged.connect(lambda item: self.on_script_item_changed(item, 'plugin'))
+        # Connect itemChanged signal for plugins
+        self.script_plugins_list.itemChanged.connect(lambda item, column: self.on_script_item_changed(item, column, 'plugin'))
         
         plugins_buttons = QHBoxLayout()
         self.move_plugin_up_btn = QPushButton("Move up")
@@ -574,10 +635,17 @@ class AshitaManagerUI(QMainWindow):
         # Right: Available Plugins (not in script)
         self.available_plugins_group = QGroupBox("Available Plugins (0)")
         available_plugins_layout = QVBoxLayout()
-        self.available_plugins_list = QListWidget()
+        
+        # Search bar for available plugins
+        self.available_plugins_search = QLineEdit()
+        self.available_plugins_search.setPlaceholderText("Search available plugins...")
+        self.available_plugins_search.textChanged.connect(lambda: self.filter_available_list('plugin'))
+        available_plugins_layout.addWidget(self.available_plugins_search)
+        
+        self.available_plugins_list = QTreeWidget()
+        self.available_plugins_list.setHeaderHidden(True)
         self.available_plugins_list.setMinimumHeight(200)
         available_plugins_layout.addWidget(self.available_plugins_list)
-        self.available_plugins_list.itemClicked.connect(lambda it: self._toggle_available_category(it, self.available_plugins_list))
         
         add_plugin_btn = QPushButton("Add to script")
         add_plugin_btn.clicked.connect(lambda: self.add_to_script('plugin'))
@@ -597,12 +665,21 @@ class AshitaManagerUI(QMainWindow):
         # Left: Addons in Script
         self.script_addons_group = QGroupBox("Addons in script")
         addons_group_layout = QVBoxLayout()
-        self.script_addons_list = QListWidget()
+        
+        # Search bar for active addons
+        self.script_addons_search = QLineEdit()
+        self.script_addons_search.setPlaceholderText("Search addons in script...")
+        self.script_addons_search.textChanged.connect(lambda: self.filter_script_list('addon'))
+        addons_group_layout.addWidget(self.script_addons_search)
+        
+        self.script_addons_list = QTreeWidget()
+        self.script_addons_list.setHeaderHidden(True)
+        self.script_addons_list.setRootIsDecorated(False)  # Remove indentation for flat list
         self.script_addons_list.setMinimumHeight(200)
         addons_group_layout.addWidget(self.script_addons_list)
         
-        # Connect item change to update enabled state
-        self.script_addons_list.itemChanged.connect(lambda item: self.on_script_item_changed(item, 'addon'))
+        # Connect itemChanged signal for addons
+        self.script_addons_list.itemChanged.connect(lambda item, column: self.on_script_item_changed(item, column, 'addon'))
         
         addons_buttons = QHBoxLayout()
         self.move_addon_up_btn = QPushButton("Move up")
@@ -634,10 +711,17 @@ class AshitaManagerUI(QMainWindow):
         # Right: Available Addons (not in script)
         self.available_addons_group = QGroupBox("Available Addons (0)")
         available_addons_layout = QVBoxLayout()
-        self.available_addons_list = QListWidget()
+        
+        # Search bar for available addons
+        self.available_addons_search = QLineEdit()
+        self.available_addons_search.setPlaceholderText("Search available addons...")
+        self.available_addons_search.textChanged.connect(lambda: self.filter_available_list('addon'))
+        available_addons_layout.addWidget(self.available_addons_search)
+        
+        self.available_addons_list = QTreeWidget()
+        self.available_addons_list.setHeaderHidden(True)
         self.available_addons_list.setMinimumHeight(200)
         available_addons_layout.addWidget(self.available_addons_list)
-        self.available_addons_list.itemClicked.connect(lambda it: self._toggle_available_category(it, self.available_addons_list))
         
         add_addon_btn = QPushButton("Add to script")
         add_addon_btn.clicked.connect(lambda: self.add_to_script('addon'))
@@ -659,7 +743,7 @@ class AshitaManagerUI(QMainWindow):
         exec_group_layout.addWidget(self.script_exec_list)
         
         # Connect item change to update enabled state
-        self.script_exec_list.itemChanged.connect(lambda item: self.on_script_item_changed(item, 'exec'))
+        self.script_exec_list.itemChanged.connect(lambda item: self.on_script_item_changed(item, None, 'exec'))
         
         exec_buttons = QHBoxLayout()
         self.add_exec_btn = QPushButton("Add Keybind/Alias")
@@ -702,7 +786,7 @@ class AshitaManagerUI(QMainWindow):
         config_group_layout.addWidget(self.script_config_list)
         
         # Connect item change to update enabled state
-        self.script_config_list.itemChanged.connect(lambda item: self.on_script_item_changed(item, 'config'))
+        self.script_config_list.itemChanged.connect(lambda item: self.on_script_item_changed(item, None, 'config'))
         
         config_buttons = QHBoxLayout()
         self.add_config_btn = QPushButton("Add Command")
@@ -790,7 +874,7 @@ class AshitaManagerUI(QMainWindow):
         # Initial log message
         self.log("Ashita Package Manager started")
         
-        # Status/footer: show Ashita folder and detected branch
+        # Footer: Ashita folder and branch
         try:
             ashita_display = str(self.ashita_root)
             branch_display = getattr(self.package_manager, 'official_repo_branch', 'main')
@@ -896,6 +980,7 @@ class AshitaManagerUI(QMainWindow):
             'refresh': 'SP_DialogRetryButton',
             'save': 'SP_DialogSaveButton',
             'yes_all': 'SP_DialogYesToAllButton',
+            'help': 'SP_DialogHelpButton',
         }
         enum_name = mapping.get(key)
         if not enum_name:
@@ -973,6 +1058,14 @@ class AshitaManagerUI(QMainWindow):
         
         self.progress = self._create_progress("Installing package...", "Cancel", 0, 0)
 
+        # Store parameters for potential conflict retry
+        self._last_install_params = {
+            'url': url,
+            'pkg_type': pkg_type,
+            'install_method': install_method,
+            'branch': None
+        }
+
         # If cloning, attempt to list remote branches and prompt the user if there are multiple
         branch = None
         if install_method == 'Clone':
@@ -982,17 +1075,27 @@ class AshitaManagerUI(QMainWindow):
                 branches = None
 
             if branches and len(branches) > 1:
-                # ask the user which branch to install
-                branch_choice, ok = QInputDialog.getItem(self, "Select branch", "Select branch to install:", branches, 0, False)
+                # prompt the user which branch to install, defaults to main or master if available
+                default_index = 0
+                if 'main' in branches:
+                    default_index = branches.index('main')
+                elif 'master' in branches:
+                    default_index = branches.index('master')
+                
+                branch_choice, ok = QInputDialog.getItem(self, "Select branch", "Select branch to install:", branches, default_index, False)
                 if not ok:
                     self.progress.close()
                     return
                 branch = branch_choice
+            
+            # Update stored branch parameter
+            self._last_install_params['branch'] = branch
 
         self.worker = InstallWorker(self.package_manager, url, pkg_type, install_method, branch=branch)
         self.worker.progress.connect(self.update_progress)
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.install_finished)
+        self.worker.conflict_detected.connect(self.handle_install_conflict)
         self.worker.start()
     
     def update_progress(self, message):
@@ -1011,6 +1114,123 @@ class AshitaManagerUI(QMainWindow):
             self.log(f"Installation failed: {message}")
             self._show_centered_message(QMessageBox.Icon.Critical, "Error", f"Installation failed:\n{message}")
     
+    def handle_install_conflict(self, result):
+        """Handle file conflicts detected during installation"""
+        self.progress.close()
+        
+        is_monorepo = result.get('monorepo', False)
+        conflicts = result.get('conflicts', {})
+        
+        # Build conflict message
+        if is_monorepo:
+            # Handle monorepo conflicts
+            conflict_msg = "File conflicts detected in monorepo addons:\n\n"
+            
+            for addon_name, addon_conflicts in conflicts.items():
+                lib_conflicts = addon_conflicts.get('libs', [])
+                docs_conflict = addon_conflicts.get('docs', False)
+                resources_conflict = addon_conflicts.get('resources', False)
+                
+                conflict_msg += f"Addon: {addon_name}\n"
+                
+                if lib_conflicts:
+                    conflict_msg += "  Library Files:\n"
+                    for conflict in lib_conflicts:
+                        owner = conflict.get('owner', 'Unknown')
+                        owner_source = conflict.get('owner_source', 'Unknown')
+                        file_path = conflict.get('file', 'Unknown')
+                        conflict_msg += f"    • {file_path}\n      (owned by '{owner}' from {owner_source})\n"
+                
+                if docs_conflict:
+                    conflict_msg += "  • Documentation folder already exists\n"
+                
+                if resources_conflict:
+                    conflict_msg += "  • Resources folder already exists\n"
+                
+                conflict_msg += "\n"
+        else:
+            # Handle single addon conflicts
+            lib_conflicts = conflicts.get('libs', [])
+            docs_conflict = conflicts.get('docs', False)
+            resources_conflict = conflicts.get('resources', False)
+            
+            conflict_msg = "File conflicts detected during installation:\n\n"
+            
+            if lib_conflicts:
+                conflict_msg += "Library Files:\n"
+                for conflict in lib_conflicts:
+                    owner = conflict.get('owner', 'Unknown')
+                    owner_source = conflict.get('owner_source', 'Unknown')
+                    file_path = conflict.get('file', 'Unknown')
+                    conflict_msg += f"  • {file_path}\n    (owned by '{owner}' from {owner_source})\n"
+                conflict_msg += "\n"
+            
+            if docs_conflict:
+                conflict_msg += "• Documentation folder already exists\n\n"
+            
+            if resources_conflict:
+                conflict_msg += "• Resources folder already exists\n\n"
+        
+        # Create custom dialog with scrollable text area
+        dialog = QDialog(self)
+        dialog.setWindowTitle("File Conflicts Detected")
+        dialog.setMinimumWidth(600)
+        dialog.setMaximumHeight(500)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Scrollable text area for conflict details
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setPlainText(conflict_msg)
+        layout.addWidget(text_edit)
+        
+        # Question label
+        question_label = QLabel("Do you want to overwrite these files and continue installation?")
+        question_label.setWordWrap(True)
+        layout.addWidget(question_label)
+        
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        # Show dialog and handle response
+        reply = dialog.exec()
+        
+        if reply == QDialog.DialogCode.Accepted:
+            # Retry installation with force=True
+            self.log("Retrying installation with conflict override...")
+            self._retry_install_with_force()
+        else:
+            self.log("Installation cancelled by user")
+    
+    def _retry_install_with_force(self):
+        """Retry the last installation attempt with force=True to skip conflict checks"""
+        if not hasattr(self, '_last_install_params'):
+            self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Installation parameters not found")
+            return
+        
+        params = self._last_install_params
+        url = params['url']
+        pkg_type = params['pkg_type']
+        install_method = params['install_method']
+        branch = params.get('branch')
+        
+        self.progress = QProgressDialog("Installing package...", None, 0, 0, self)
+        self.progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress.show()
+        
+        self.worker = InstallWorker(self.package_manager, url, pkg_type, install_method, branch=branch, force=True)
+        self.worker.progress.connect(self.update_progress)
+        self.worker.progress.connect(self.log)
+        self.worker.finished.connect(self.install_finished)
+        self.worker.conflict_detected.connect(self.handle_install_conflict)  # In case nested conflicts occur
+        self.worker.start()
+    
     def refresh_package_lists(self):
         packages = self.package_tracker.get_all_packages()
         
@@ -1022,8 +1242,12 @@ class AshitaManagerUI(QMainWindow):
         
         self.tabs.setTabText(0, f"Addons ({addon_count})")
         self.tabs.setTabText(1, f"Plugins ({plugin_count})")
+        
+        # refresh the script editor lists
+        if self.current_script:
+            self.populate_script_ui()
     
-    def _populate_package_list(self, list_widget, packages, pkg_type):
+    def _populate_package_list(self, tree_widget, packages, pkg_type):
         categories = {
             'pre-installed': [],
             'git': [],
@@ -1048,53 +1272,107 @@ class AshitaManagerUI(QMainWindow):
             if not items:
                 continue
             
-            category_item = QListWidgetItem(f"▼ {category_labels[category_key]} ({len(items)})")
-            category_item.setData(Qt.ItemDataRole.UserRole, {
+            category_item = QTreeWidgetItem(tree_widget)
+            category_item.setText(0, f"{category_labels[category_key]} ({len(items)})")
+            category_item.setData(0, Qt.ItemDataRole.UserRole, {
                 'is_category': True, 
-                'category': category_key,
-                'expanded': True
+                'category': category_key
             })
             font = QFont()
             font.setBold(True)
-            category_item.setFont(font)
-            category_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            list_widget.addItem(category_item)
+            category_item.setFont(0, font)
+            category_item.setExpanded(True)  # Start expanded
             
             for name, info in sorted(items, key=lambda x: x[0].lower()):
-                item = QListWidgetItem(f"  {name}")
-                item.setData(Qt.ItemDataRole.UserRole, {
+                item = QTreeWidgetItem(category_item)
+                item.setText(0, name)
+                item.setData(0, Qt.ItemDataRole.UserRole, {
                     'type': pkg_type, 
                     'name': name, 
                     'info': info,
                     'category': category_key
                 })
-                list_widget.addItem(item)
                 total_count += 1
         
         return total_count
     
     def filter_packages(self, pkg_type):
-        list_widget = self.addons_list if pkg_type == 'addon' else self.plugins_list
+        tree_widget = self.addons_list if pkg_type == 'addon' else self.plugins_list
         search_text = (self.addons_search.text() if pkg_type == 'addon' else self.plugins_search.text()).lower()
 
-        for i in range(list_widget.count()):
-            item = list_widget.item(i)
-            data = item.data(Qt.ItemDataRole.UserRole) or {}
-
-            if data.get('is_category'):
-                item.setHidden(False)
-            else:
+        # Iterate through top-level categories
+        for i in range(tree_widget.topLevelItemCount()):
+            category_item = tree_widget.topLevelItem(i)
+            category_has_visible = False
+            
+            # Check children (packages)
+            for j in range(category_item.childCount()):
+                child = category_item.child(j)
+                data = child.data(0, Qt.ItemDataRole.UserRole) or {}
                 name = data.get('name', '')
-                if not search_text:
-                    item.setHidden(False)
+                
+                if not search_text or search_text in name.lower():
+                    child.setHidden(False)
+                    category_has_visible = True
                 else:
-                    item.setHidden(search_text not in name.lower())
+                    child.setHidden(True)
+            
+            # Hide category if no children are visible
+            category_item.setHidden(not category_has_visible and bool(search_text))
+    
+    def filter_script_list(self, pkg_type):
+        """Filter active plugins/addons in script by search text"""
+        tree_widget = self.script_addons_list if pkg_type == 'addon' else self.script_plugins_list
+        search_text = (self.script_addons_search.text() if pkg_type == 'addon' else self.script_plugins_search.text()).lower()
+
+        # Iterate through categories
+        for i in range(tree_widget.topLevelItemCount()):
+            category_item = tree_widget.topLevelItem(i)
+            category_has_visible = False
+            
+            # Check children
+            for j in range(category_item.childCount()):
+                child = category_item.child(j)
+                item_text = child.text(0).lower()
+                
+                if not search_text or search_text in item_text:
+                    child.setHidden(False)
+                    category_has_visible = True
+                else:
+                    child.setHidden(True)
+            
+            # Hide category if no children are visible
+            category_item.setHidden(not category_has_visible and bool(search_text))
+    
+    def filter_available_list(self, pkg_type):
+        """Filter available plugins/addons by search text"""
+        tree_widget = self.available_addons_list if pkg_type == 'addon' else self.available_plugins_list
+        search_text = (self.available_addons_search.text() if pkg_type == 'addon' else self.available_plugins_search.text()).lower()
+
+        # Iterate through top-level categories
+        for i in range(tree_widget.topLevelItemCount()):
+            category_item = tree_widget.topLevelItem(i)
+            category_has_visible = False
+            
+            # Check children (available packages)
+            for j in range(category_item.childCount()):
+                child = category_item.child(j)
+                data = child.data(0, Qt.ItemDataRole.UserRole) or {}
+                name = data.get('name', '')
+                
+                if not search_text or search_text in name.lower():
+                    child.setHidden(False)
+                    category_has_visible = True
+                else:
+                    child.setHidden(True)
+            
+            # Hide category if no children are visible
+            category_item.setHidden(not category_has_visible and bool(search_text))
     
     def show_package_info(self, item):
-        data = item.data(Qt.ItemDataRole.UserRole)
+        data = item.data(0, Qt.ItemDataRole.UserRole)
         
         if data.get('is_category'):
-            self._toggle_category(item)
             return
         
         info = data['info']
@@ -1122,91 +1400,46 @@ class AshitaManagerUI(QMainWindow):
         
         self.info_text.setPlainText(info_text)
     
-    def _toggle_category(self, category_item):
-        list_widget = self.addons_list if self.addons_list.indexFromItem(category_item).isValid() else self.plugins_list
-        data = category_item.data(Qt.ItemDataRole.UserRole)
-        category = data.get('category')
-        expanded = data.get('expanded', True)
-        
-        new_expanded = not expanded
-        data['expanded'] = new_expanded
-        category_item.setData(Qt.ItemDataRole.UserRole, data)
-        
-        category_text = category_item.text()
-        if new_expanded:
-            category_item.setText(category_text.replace('▶', '▼'))
-        else:
-            category_item.setText(category_text.replace('▼', '▶'))
-        
-        category_index = list_widget.row(category_item)
-        for i in range(category_index + 1, list_widget.count()):
-            item = list_widget.item(i)
-            item_data = item.data(Qt.ItemDataRole.UserRole)
-            
-            if item_data.get('is_category'):
-                break
-            
-            if item_data.get('category') == category:
-                item.setHidden(not new_expanded)
-
-    def _toggle_available_category(self, category_item, list_widget):
-        """Toggle expand/collapse for category headers in available lists.
-        list_widget should be either self.available_plugins_list or self.available_addons_list.
-        """
-        data = category_item.data(Qt.ItemDataRole.UserRole) or {}
-        if not data.get('is_category'):
-            return
-
-        category = data.get('category')
-        expanded = data.get('expanded', True)
-
-        new_expanded = not expanded
-        data['expanded'] = new_expanded
-        category_item.setData(Qt.ItemDataRole.UserRole, data)
-
-        category_text = category_item.text()
-        if new_expanded:
-            category_item.setText(category_text.replace('▶', '▼'))
-        else:
-            category_item.setText(category_text.replace('▼', '▶'))
-
-        category_index = list_widget.row(category_item)
-        for i in range(category_index + 1, list_widget.count()):
-            item = list_widget.item(i)
-            item_data = item.data(Qt.ItemDataRole.UserRole) or {}
-
-            if item_data.get('is_category'):
-                break
-
-            # Only hide/show regular package items that belong to this category
-            # (we store no category on package items here, so just toggle until next category)
-            item.setHidden(not new_expanded)
     
     def update_package(self, pkg_type):
-        list_widget = self.addons_list if pkg_type == "addon" else self.plugins_list
-        current_item = list_widget.currentItem()
+        tree_widget = self.addons_list if pkg_type == "addon" else self.plugins_list
+        selected_items = tree_widget.selectedItems()
         
-        if not current_item:
-            self._show_centered_message(QMessageBox.Icon.Warning, "Error", f"Please select a {pkg_type} to update")
+        if not selected_items:
+            self._show_centered_message(QMessageBox.Icon.Warning, "Error", f"Please select one or more {pkg_type}s to update")
             return
         
-        data = current_item.data(Qt.ItemDataRole.UserRole)
+        # Filter out categories and get package names
+        package_names = []
+        for item in selected_items:
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if not data.get('is_category'):
+                package_names.append(data['name'])
         
-        if data.get('is_category'):
-            self._show_centered_message(QMessageBox.Icon.Warning, "Error", f"Please select a {pkg_type}, not a category")
+        if not package_names:
+            self._show_centered_message(QMessageBox.Icon.Warning, "Error", "Please select packages, not categories")
             return
         
-        package_name = data['name']
-        
-        self.log(f"Starting update for {package_name}...")
-        
-        self.progress = self._create_progress(f"Updating {package_name}...", None, 0, 0)
-        
-        self.update_worker = UpdateWorker(self.package_manager, package_name, pkg_type)
-        self.update_worker.progress.connect(self.update_progress)
-        self.update_worker.progress.connect(self.log)
-        self.update_worker.finished.connect(self.update_finished)
-        self.update_worker.start()
+        if len(package_names) == 1:
+            # Single package update
+            package_name = package_names[0]
+            self.log(f"Starting update for {package_name}...")
+            self.progress = self._create_progress(f"Updating {package_name}...", None, 0, 0)
+            self.update_worker = UpdateWorker(self.package_manager, package_name, pkg_type)
+            self.update_worker.progress.connect(self.update_progress)
+            self.update_worker.progress.connect(self.log)
+            self.update_worker.finished.connect(self.update_finished)
+            self.update_worker.start()
+        else:
+            # Multiple packages - use batch update
+            self.log(f"Starting batch update of {len(package_names)} {pkg_type}s...")
+            self.batch_progress = self._create_progress(f"Updating {pkg_type}s...", "Cancel", 0, len(package_names))
+            self.batch_worker = BatchUpdateWorker(self.package_manager, package_names, pkg_type)
+            self.batch_worker.progress.connect(self.batch_update_progress)
+            self.batch_worker.log.connect(self.log)
+            self.batch_worker.finished.connect(self.batch_update_finished)
+            self.batch_progress.canceled.connect(self.batch_worker.cancel)
+            self.batch_worker.start()
     
     def update_finished(self, success, message, already_updated=False):
         self.progress.close()
@@ -1268,23 +1501,33 @@ class AshitaManagerUI(QMainWindow):
         self._show_centered_message(QMessageBox.Icon.Information, "Batch update complete", summary)
     
     def remove_package(self, pkg_type):
-        list_widget = self.addons_list if pkg_type == "addon" else self.plugins_list
-        current_item = list_widget.currentItem()
+        tree_widget = self.addons_list if pkg_type == "addon" else self.plugins_list
+        selected_items = tree_widget.selectedItems()
         
-        if not current_item:
-            self._show_centered_message(QMessageBox.Icon.Warning, "Error", f"Please select a {pkg_type} to remove")
+        if not selected_items:
+            self._show_centered_message(QMessageBox.Icon.Warning, "Error", f"Please select one or more {pkg_type}s to remove")
             return
         
-        data = current_item.data(Qt.ItemDataRole.UserRole)
+        # Filter out categories and get package names
+        package_names = []
+        for item in selected_items:
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if not data.get('is_category'):
+                package_names.append(data['name'])
         
-        if data.get('is_category'):
-            self._show_centered_message(QMessageBox.Icon.Warning, "Error", f"Please select a {pkg_type}, not a category")
+        if not package_names:
+            self._show_centered_message(QMessageBox.Icon.Warning, "Error", "Please select packages, not categories")
             return
         
-        package_name = data['name']
+        # Confirm removal
+        if len(package_names) == 1:
+            confirm_text = f"Are you sure you want to remove '{package_names[0]}'?"
+        else:
+            confirm_text = f"Are you sure you want to remove {len(package_names)} {pkg_type}s?\n\n" + "\n".join(package_names)
+        
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Icon.Question)
-        msg.setText(f"Are you sure you want to remove '{package_name}'?")
+        msg.setText(confirm_text)
         msg.setWindowTitle("Confirm removal")
         msg.setMinimumSize(420, 140)
         msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
@@ -1292,17 +1535,139 @@ class AshitaManagerUI(QMainWindow):
         self._center_widget(msg)
 
         if msg.exec() == QMessageBox.StandardButton.Yes:
-            self.log(f"Removing {package_name}...")
-            result = self.package_manager.remove_package(package_name, pkg_type)
+            success_count = 0
+            failed = []
             
-            if result['success']:
-                self.log(result['message'])
-                self._show_centered_message(QMessageBox.Icon.Information, "Success", result['message'])
-                self.refresh_package_lists()
-                self.info_text.clear()
+            for package_name in package_names:
+                self.log(f"Removing {package_name}...")
+                result = self.package_manager.remove_package(package_name, pkg_type)
+                
+                if result['success']:
+                    self.log(result['message'])
+                    success_count += 1
+                else:
+                    self.log(f"Removal failed: {result['error']}")
+                    failed.append(f"{package_name}: {result['error']}")
+            
+            self.refresh_package_lists()
+            self.info_text.clear()
+            
+            if success_count > 0 and not failed:
+                self._show_centered_message(QMessageBox.Icon.Information, "Success", f"Successfully removed {success_count} {pkg_type}(s)")
+            elif success_count > 0 and failed:
+                self._show_centered_message(QMessageBox.Icon.Warning, "Partial Success", f"Removed {success_count}, failed {len(failed)}:\n" + "\n".join(failed))
             else:
-                self.log(f"Removal failed: {result['error']}")
-                self._show_centered_message(QMessageBox.Icon.Critical, "Error", result['error'])
+                self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Failed to remove packages:\n" + "\n".join(failed))
+    
+    def open_repository(self, pkg_type):
+        """Open the repository URL in the default browser"""
+        tree_widget = self.addons_list if pkg_type == "addon" else self.plugins_list
+        selected_items = tree_widget.selectedItems()
+        
+        if not selected_items:
+            self._show_centered_message(QMessageBox.Icon.Warning, "Error", f"Please select a {pkg_type} to view its repository")
+            return
+        
+        # Get first non-category item
+        for item in selected_items:
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if not data.get('is_category'):
+                info = data.get('info', {})
+                source = info.get('source')
+                if source:
+                    import webbrowser
+                    webbrowser.open(source)
+                    self.log(f"Opening repository: {source}")
+                else:
+                    self._show_centered_message(QMessageBox.Icon.Warning, "No Repository", "No repository URL found for this package")
+                return
+        
+        self._show_centered_message(QMessageBox.Icon.Warning, "Error", "Please select a package, not a category")
+    
+    def open_readme(self, pkg_type):
+        """Display README.md content in a popup window with markdown rendering"""
+        tree_widget = self.addons_list if pkg_type == "addon" else self.plugins_list
+        selected_items = tree_widget.selectedItems()
+        
+        if not selected_items:
+            self._show_centered_message(QMessageBox.Icon.Warning, "Error", f"Please select a {pkg_type} to view its README")
+            return
+        
+        # Get first non-category item
+        for item in selected_items:
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if not data.get('is_category'):
+                package_name = data.get('name')
+                
+                # Find README file
+                if pkg_type == 'addon':
+                    package_dir = self.package_manager.addons_dir / package_name
+                else:
+                    # For plugins, check docs folder
+                    package_dir = self.package_manager.docs_dir / package_name
+                
+                readme_files = ['README.md', 'readme.md', 'Readme.md', 'README.MD', 'README.txt', 'readme.txt', 'INDEX.html', 'index.html', 'Index.html', 'README.html', 'readme.html', 'Readme.html']
+                readme_path = None
+                
+                for readme_name in readme_files:
+                    potential_path = package_dir / readme_name
+                    if potential_path.exists():
+                        readme_path = potential_path
+                        break
+                
+                if readme_path:
+                    try:
+                        with open(readme_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                        
+                        # Create dialog
+                        dialog = QDialog(self)
+                        dialog.setWindowTitle(f"{package_name} - README")
+                        dialog.setMinimumSize(800, 600)
+                        
+                        layout = QVBoxLayout(dialog)
+                        
+                        # Determine content type
+                        is_markdown = readme_path.suffix.lower() in ['.md', '.markdown']
+                        is_html = readme_path.suffix.lower() in ['.html', '.htm']
+                        
+                        if WEBENGINE_AVAILABLE and (is_markdown or is_html):
+                            markdown_viewer = MarkdownViewer(dialog)
+                            if is_html:
+                                # For HTML, set it directly without markdown parsing
+                                markdown_viewer.set_html(content)
+                            else:
+                                # For markdown, use markdown parsing
+                                markdown_viewer.set_markdown(content)
+                            layout.addWidget(markdown_viewer)
+                        else:
+                            # Fallback to QTextEdit
+                            text_display = QTextEdit()
+                            text_display.setReadOnly(True)
+                            
+                            if is_markdown:
+                                # Try to use built-in markdown support
+                                text_display.setMarkdown(content)
+                            else:
+                                text_display.setPlainText(content)
+                            
+                            layout.addWidget(text_display)
+                        
+                        close_btn = QPushButton("Close")
+                        close_btn.clicked.connect(dialog.close)
+                        layout.addWidget(close_btn)
+                        
+                        dialog.show()
+                        self._center_widget(dialog)
+                        dialog.exec()
+                        
+                    except Exception as e:
+                        self._show_centered_message(QMessageBox.Icon.Critical, "Error", f"Failed to read README:\n{str(e)}")
+                else:
+                    self._show_centered_message(QMessageBox.Icon.Information, "No README", f"No README file found for {package_name}")
+                return
+        
+        self._show_centered_message(QMessageBox.Icon.Warning, "Error", "Please select a package, not a category")
     
     def refresh_script_list(self):
         scripts_dir = os.path.join(self.ashita_root, 'scripts')
@@ -1354,40 +1719,32 @@ class AshitaManagerUI(QMainWindow):
         
         # Populate plugins
         self.script_plugins_list.clear()
-        enabled_count = 0
         for plugin in self.current_script.plugins:
-            item = QListWidgetItem(plugin['name'])
-            item.setData(Qt.ItemDataRole.UserRole, plugin)
+            item = QTreeWidgetItem(self.script_plugins_list)
+            item.setText(0, plugin['name'])
+            item.setData(0, Qt.ItemDataRole.UserRole, plugin)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if plugin['enabled'] else Qt.CheckState.Unchecked)
-            self.script_plugins_list.addItem(item)
-            if plugin['enabled']:
-                enabled_count += 1
+            item.setCheckState(0, Qt.CheckState.Checked if plugin['enabled'] else Qt.CheckState.Unchecked)
         
-        # Update plugins group title with counts
+        # Update plugins group title
+        enabled_count = sum(1 for p in self.current_script.plugins if p['enabled'])
         disabled_count = len(self.current_script.plugins) - enabled_count
-        self.script_plugins_group.setTitle(
-            f"Plugins (Enabled: {enabled_count} | Disabled: {disabled_count})"
-        )
+        self.script_plugins_group.setTitle(f"Plugins (Enabled: {enabled_count} | Disabled: {disabled_count})")
         
         # Populate addons
         self.script_addons_list.clear()
-        enabled_count = 0
         for addon in self.current_script.addons:
             args_text = f" {addon['args']}" if addon['args'] else ""
-            item = QListWidgetItem(f"{addon['name']}{args_text}")
-            item.setData(Qt.ItemDataRole.UserRole, addon)
+            item = QTreeWidgetItem(self.script_addons_list)
+            item.setText(0, f"{addon['name']}{args_text}")
+            item.setData(0, Qt.ItemDataRole.UserRole, addon)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if addon['enabled'] else Qt.CheckState.Unchecked)
-            self.script_addons_list.addItem(item)
-            if addon['enabled']:
-                enabled_count += 1
+            item.setCheckState(0, Qt.CheckState.Checked if addon['enabled'] else Qt.CheckState.Unchecked)
         
-        # Update addons group title with counts
+        # Update addons group title
+        enabled_count = sum(1 for a in self.current_script.addons if a['enabled'])
         disabled_count = len(self.current_script.addons) - enabled_count
-        self.script_addons_group.setTitle(
-            f"Addons (Enabled: {enabled_count} | Disabled: {disabled_count})"
-        )
+        self.script_addons_group.setTitle(f"Addons (Enabled: {enabled_count} | Disabled: {disabled_count})")
         
         # Populate exec commands
         self.script_exec_list.clear()
@@ -1411,7 +1768,7 @@ class AshitaManagerUI(QMainWindow):
             if exec_item['enabled']:
                 enabled_count += 1
         
-        # Update exec group title with counts
+        # Update exec group title
         disabled_count = len(all_execs) - enabled_count
         self.script_exec_group.setTitle(
             f"Keybinds and Alias (Enabled: {enabled_count} | Disabled: {disabled_count})"
@@ -1432,19 +1789,19 @@ class AshitaManagerUI(QMainWindow):
             if cmd['enabled']:
                 enabled_count += 1
         
-        # Update config group title with counts
+        # Update config group title
         disabled_count = len(self.current_script.config_commands) - enabled_count
         self.script_config_group.setTitle(
             f"Configuration Commands (Enabled: {enabled_count} | Disabled: {disabled_count})"
         )
         
-        # Populate available plugins (not in script)
+        # Populate available plugins
         self.available_plugins_list.clear()
         all_packages = self.package_tracker.get_all_packages()
         installed_plugins = all_packages.get('plugins', {})
         script_plugin_names = {p['name'] for p in self.current_script.plugins}
         
-        # Categorize available plugins using same categories as main lists
+        # Categorize available plugins
         categories = {
             'pre-installed': [],
             'git': [],
@@ -1459,7 +1816,7 @@ class AshitaManagerUI(QMainWindow):
                     install_method = 'git'
                 categories[install_method].append(plugin_name)
 
-        # Add category headers and items (match main lists)
+        # Add category headers and items
         total_available_plugins = 0
         category_labels = {
             'pre-installed': 'Pre-installed',
@@ -1467,37 +1824,35 @@ class AshitaManagerUI(QMainWindow):
             'release': 'Installed from Release'
         }
 
-        def _add_category(lst, key, names):
-            nonlocal total_available_plugins
+        for key in ['pre-installed', 'git', 'release']:
+            names = categories.get(key, [])
             if not names:
-                return
+                continue
+            
             label = category_labels.get(key, key)
-            cat_item = QListWidgetItem(f"▼ {label} ({len(names)})")
-            cat_item.setData(Qt.ItemDataRole.UserRole, {'is_category': True, 'category': key, 'expanded': True})
+            cat_item = QTreeWidgetItem(self.available_plugins_list)
+            cat_item.setText(0, f"{label} ({len(names)})")
+            cat_item.setData(0, Qt.ItemDataRole.UserRole, {'is_category': True, 'category': key})
             font = QFont()
             font.setBold(True)
-            cat_item.setFont(font)
-            cat_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            lst.addItem(cat_item)
+            cat_item.setFont(0, font)
+            cat_item.setExpanded(True)
+            
             for name in names:
-                item = QListWidgetItem(f"  {name}")
-                # store minimal info so selection can be validated; full info is in package_tracker
-                item.setData(Qt.ItemDataRole.UserRole, {'name': name})
-                lst.addItem(item)
+                item = QTreeWidgetItem(cat_item)
+                item.setText(0, name)
+                item.setData(0, Qt.ItemDataRole.UserRole, {'name': name})
+            
             total_available_plugins += len(names)
-
-        for key in ['pre-installed', 'git', 'release']:
-            _add_category(self.available_plugins_list, key, categories.get(key, []))
         
-        # Update available plugins group title with count
+        # Update available plugins
         self.available_plugins_group.setTitle(f"Available Plugins ({total_available_plugins})")
         
-        # Populate available addons (not in script)
+        # Populate available addons
         self.available_addons_list.clear()
         installed_addons = all_packages.get('addons', {})
         script_addon_names = {a['name'] for a in self.current_script.addons}
         
-        # Categorize available addons using same categories as main lists
         categories = {
             'pre-installed': [],
             'git': [],
@@ -1512,7 +1867,6 @@ class AshitaManagerUI(QMainWindow):
                     install_method = 'git'
                 categories[install_method].append(addon_name)
 
-        # Add category headers and items (match main lists)
         total_available_addons = 0
         category_labels = {
             'pre-installed': 'Pre-installed',
@@ -1520,26 +1874,26 @@ class AshitaManagerUI(QMainWindow):
             'release': 'Installed from Release'
         }
 
-        def _add_category_addons(lst, key, names):
-            nonlocal total_available_addons
+        for key in ['pre-installed', 'git', 'release']:
+            names = categories.get(key, [])
             if not names:
-                return
+                continue
+            
             label = category_labels.get(key, key)
-            cat_item = QListWidgetItem(f"▼ {label} ({len(names)})")
-            cat_item.setData(Qt.ItemDataRole.UserRole, {'is_category': True, 'category': key, 'expanded': True})
+            cat_item = QTreeWidgetItem(self.available_addons_list)
+            cat_item.setText(0, f"{label} ({len(names)})")
+            cat_item.setData(0, Qt.ItemDataRole.UserRole, {'is_category': True, 'category': key})
             font = QFont()
             font.setBold(True)
-            cat_item.setFont(font)
-            cat_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            lst.addItem(cat_item)
+            cat_item.setFont(0, font)
+            cat_item.setExpanded(True)
+            
             for name in names:
-                item = QListWidgetItem(f"  {name}")
-                item.setData(Qt.ItemDataRole.UserRole, {'name': name})
-                lst.addItem(item)
+                item = QTreeWidgetItem(cat_item)
+                item.setText(0, name)
+                item.setData(0, Qt.ItemDataRole.UserRole, {'name': name})
+            
             total_available_addons += len(names)
-
-        for key in ['pre-installed', 'git', 'release']:
-            _add_category_addons(self.available_addons_list, key, categories.get(key, []))
         
         # Update available addons group title with count
         self.available_addons_group.setTitle(f"Available Addons ({total_available_addons})")
@@ -1557,63 +1911,60 @@ class AshitaManagerUI(QMainWindow):
         else:
             self.info_group.setVisible(True)
     
-    def on_script_item_changed(self, item, item_type):
-        # Update the data when checkbox is toggled
-        data = item.data(Qt.ItemDataRole.UserRole)
-        if data:
-            data['enabled'] = item.checkState() == Qt.CheckState.Checked
-            
-            # Update just the count in the group title without repopulating
-            if item_type == 'plugin':
-                enabled = sum(1 for p in self.current_script.plugins if p['enabled'])
-                disabled = len(self.current_script.plugins) - enabled
-                self.script_plugins_group.setTitle(f"Plugins (Enabled: {enabled} | Disabled: {disabled})")
-            elif item_type == 'addon':
-                enabled = sum(1 for a in self.current_script.addons if a['enabled'])
-                disabled = len(self.current_script.addons) - enabled
-                self.script_addons_group.setTitle(f"Addons (Enabled: {enabled} | Disabled: {disabled})")
-            elif item_type == 'exec':
-                all_execs = self.current_script.exec_binds + self.current_script.exec_aliases + self.current_script.exec_other
-                enabled = sum(1 for e in all_execs if e['enabled'])
-                disabled = len(all_execs) - enabled
-                self.script_exec_group.setTitle(f"Execute Scripts (Enabled: {enabled} | Disabled: {disabled})")
-            elif item_type == 'config':
-                enabled = sum(1 for c in self.current_script.config_commands if c['enabled'])
-                disabled = len(self.current_script.config_commands) - enabled
-                self.script_config_group.setTitle(f"Configuration Commands (Enabled: {enabled} | Disabled: {disabled})")
+    def on_script_item_changed(self, item, column, item_type):
+        """Handle checkbox state changes"""
+        if column is not None:
+            # QTreeWidget - plugins/addons
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data:
+                data['enabled'] = item.checkState(0) == Qt.CheckState.Checked
+                # Update title counts
+                if item_type == 'plugin':
+                    enabled = sum(1 for p in self.current_script.plugins if p['enabled'])
+                    disabled = len(self.current_script.plugins) - enabled
+                    self.script_plugins_group.setTitle(f"Plugins (Enabled: {enabled} | Disabled: {disabled})")
+                elif item_type == 'addon':
+                    enabled = sum(1 for a in self.current_script.addons if a['enabled'])
+                    disabled = len(self.current_script.addons) - enabled
+                    self.script_addons_group.setTitle(f"Addons (Enabled: {enabled} | Disabled: {disabled})")
+        else:
+            # QListWidget - exec and config
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data:
+                data['enabled'] = item.checkState() == Qt.CheckState.Checked
+                if item_type == 'exec':
+                    all_execs = self.current_script.exec_binds + self.current_script.exec_aliases + self.current_script.exec_other
+                    enabled = sum(1 for e in all_execs if e['enabled'])
+                    disabled = len(all_execs) - enabled
+                    self.script_exec_group.setTitle(f"Keybinds and Alias (Enabled: {enabled} | Disabled: {disabled})")
+                elif item_type == 'config':
+                    enabled = sum(1 for c in self.current_script.config_commands if c['enabled'])
+                    disabled = len(self.current_script.config_commands) - enabled
+                    self.script_config_group.setTitle(f"Configuration Commands (Enabled: {enabled} | Disabled: {disabled})")
 
     def _sync_ui_to_script(self):
-        """
-        Read the current UI lists (checkbox states and order) and update the
-        self.current_script data structures so save() writes the correct state.
-        """
+        """Sync UI states back to script model before saving"""
         if not self.current_script:
             return
 
-        # Plugins
+        # Plugins - simple flat list now
         new_plugins = []
-        for i in range(self.script_plugins_list.count()):
-            item = self.script_plugins_list.item(i)
-            data = item.data(Qt.ItemDataRole.UserRole) or {}
-            enabled = item.checkState() == Qt.CheckState.Checked
-            data['enabled'] = enabled
-            # Ensure name present
-            name = data.get('name') or item.text()
-            data['name'] = name
-            new_plugins.append(data)
+        for i in range(self.script_plugins_list.topLevelItemCount()):
+            item = self.script_plugins_list.topLevelItem(i)
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data:
+                data['enabled'] = item.checkState(0) == Qt.CheckState.Checked
+                new_plugins.append(data)
         self.current_script.plugins = new_plugins
 
-        # Addons
+        # Addons - simple flat list now
         new_addons = []
-        for i in range(self.script_addons_list.count()):
-            item = self.script_addons_list.item(i)
-            data = item.data(Qt.ItemDataRole.UserRole) or {}
-            enabled = item.checkState() == Qt.CheckState.Checked
-            data['enabled'] = enabled
-            # Preserve args if present
-            name = data.get('name') or item.text()
-            data['name'] = name
-            new_addons.append(data)
+        for i in range(self.script_addons_list.topLevelItemCount()):
+            item = self.script_addons_list.topLevelItem(i)
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data:
+                data['enabled'] = item.checkState(0) == Qt.CheckState.Checked
+                new_addons.append(data)
         self.current_script.addons = new_addons
 
         # Execs: rebuild lists in order shown
@@ -1663,54 +2014,55 @@ class AshitaManagerUI(QMainWindow):
         self.current_script.config_commands = new_configs
     
     def move_script_item(self, item_type, direction):
+        """Move a plugin/addon up or down in the script"""
         if item_type == 'plugin':
-            list_widget = self.script_plugins_list
+            tree_widget = self.script_plugins_list
             items_list = self.current_script.plugins
         elif item_type == 'addon':
-            list_widget = self.script_addons_list
+            tree_widget = self.script_addons_list
             items_list = self.current_script.addons
         else:
             return
         
-        current = list_widget.currentItem()
-        if not current:
+        current_item = tree_widget.currentItem()
+        if not current_item:
             return
         
-        current_row = list_widget.currentRow()
-        new_row = current_row + direction
+        # Get current index in the list
+        current_index = tree_widget.indexOfTopLevelItem(current_item)
+        if current_index == -1:
+            return
         
-        if new_row < 0 or new_row >= list_widget.count():
+        new_index = current_index + direction
+        
+        if new_index < 0 or new_index >= tree_widget.topLevelItemCount():
             return
         
         # Swap in the data list
-        items_list[current_row], items_list[new_row] = items_list[new_row], items_list[current_row]
+        items_list[current_index], items_list[new_index] = items_list[new_index], items_list[current_index]
         
-        # Refresh UI
-        self.populate_script_ui()
-        
-        # Restore selection
-        list_widget.setCurrentRow(new_row)
+        # Move the item in the UI without repopulating
+        tree_widget.blockSignals(True)
+        item_to_move = tree_widget.takeTopLevelItem(current_index)
+        tree_widget.insertTopLevelItem(new_index, item_to_move)
+        tree_widget.setCurrentItem(item_to_move)
+        tree_widget.blockSignals(False)
     
     def add_exec_command(self):
         from PyQt6.QtWidgets import QInputDialog
         
-        # Ask for command type
+        # Prompt for command type
         items = ["Exec (Load script file)", "Bind (Keybind)", "Alias (Command alias)"]
         item, ok = QInputDialog.getItem(self, "Add Command", "Select command type:", items, 0, False)
         
         if not ok:
             return
         
-        if item.startswith("Add"):
-            text, ok = QInputDialog.getText(self, "Add Keybind/Alias Command", "Enter exec path (e.g., binds/CharacterName):")
+        if item.startswith("Exec"):
+            text, ok = QInputDialog.getText(self, "Add Exec Command", "Enter exec path (e.g., binds/CharacterName):")
             if ok and text:
                 exec_item = {'path': text.strip(), 'enabled': True, 'original': f'/exec {text.strip()}', 'type': 'exec'}
-                if 'bind' in text.lower():
-                    self.current_script.exec_binds.append(exec_item)
-                elif 'alias' in text.lower():
-                    self.current_script.exec_aliases.append(exec_item)
-                else:
-                    self.current_script.exec_other.append(exec_item)
+                self.current_script.exec_other.append(exec_item)
                 self.populate_script_ui()
         
         elif item.startswith("Bind"):
@@ -1781,7 +2133,7 @@ class AshitaManagerUI(QMainWindow):
             return
         
         # Get the package name from UserRole data (handles category items)
-        data = current_item.data(Qt.ItemDataRole.UserRole)
+        data = current_item.data(0, Qt.ItemDataRole.UserRole)
         if not data or 'name' not in data:
             # This is a category header, not a package
             self._show_centered_message(QMessageBox.Icon.Warning, "Invalid selection", "Please select a package, not a category")
@@ -1811,8 +2163,8 @@ class AshitaManagerUI(QMainWindow):
             self._show_centered_message(QMessageBox.Icon.Warning, "No selection", f"Please select a {item_type} to remove")
             return
         
-        data = current_item.data(Qt.ItemDataRole.UserRole)
-        if not data:
+        data = current_item.data(0, Qt.ItemDataRole.UserRole)
+        if not data or data.get('is_category'):
             return
         
         # Remove from the script model

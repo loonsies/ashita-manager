@@ -36,7 +36,7 @@ class PackageTracker:
             'settings': {}
         }
     
-    def _save_packages(self):
+    def save_packages(self):
         """Save packages to ashita-packages.json"""
         self.packages['last_updated'] = datetime.now().isoformat()
         try:
@@ -46,7 +46,7 @@ class PackageTracker:
         except Exception as e:
             print(f"Error saving packages: {e}")
             return False
-    
+
     def is_first_launch(self):
         has_ashita_path = bool(self.get_setting('ashita_path', ''))
         has_packages = len(self.packages.get('addons', {})) > 0 or len(self.packages.get('plugins', {})) > 0
@@ -59,7 +59,7 @@ class PackageTracker:
         type_key = f"{pkg_type}s"  # 'addons' or 'plugins'
         
         self.packages[type_key][name] = package_info
-        return self._save_packages()
+        return self.save_packages()
     
     def remove_package(self, name, pkg_type):
         """Remove a package from the tracker"""
@@ -70,7 +70,7 @@ class PackageTracker:
         
         if name in self.packages[type_key]:
             del self.packages[type_key][name]
-            return self._save_packages()
+            return self.save_packages()
         
         return False
     
@@ -113,7 +113,7 @@ class PackageTracker:
         
         if name in self.packages[type_key]:
             self.packages[type_key][name].update(updates)
-            return self._save_packages()
+            return self.save_packages()
         
         return False
     
@@ -135,7 +135,7 @@ class PackageTracker:
             # Validate structure
             if 'addons' in imported and 'plugins' in imported:
                 self.packages = imported
-                return self._save_packages()
+                return self.save_packages()
             
             return False
         except Exception:
@@ -152,7 +152,7 @@ class PackageTracker:
         if 'settings' not in self.packages:
             self.packages['settings'] = {}
         self.packages['settings'][key] = value
-        return self._save_packages()
+        return self.save_packages()
     
     def get_all_settings(self):
         """Get all settings"""

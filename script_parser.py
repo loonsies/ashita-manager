@@ -42,7 +42,7 @@ class ScriptParser:
                 plugin_name = stripped[6:].strip()
                 self.plugins.append({'name': plugin_name, 'enabled': enabled, 'original': line.rstrip()})
             
-            # Parse /addon load commands
+            # Parse /addon load commands (addons)
             elif stripped.startswith('/addon load '):
                 addon_parts = stripped[12:].strip().split()
                 addon_name = addon_parts[0]
