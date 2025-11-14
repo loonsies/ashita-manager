@@ -57,14 +57,22 @@ jobs:
 
     - name: Generate changelog
       id: changelog
+      shell: powershell
       run: |
+        # Avoid terminating on non-zero native command exit codes
+        $ErrorActionPreference = 'SilentlyContinue'
+
+        # Try to get the previous tag; git returns non-zero when none exists
         $PREV_TAG = git describe --tags --abbrev=0 HEAD^ 2>$null
-        if ($PREV_TAG) {
+
+        if (-not $PREV_TAG -or $LASTEXITCODE -ne 0) {
+          $CHANGELOG = 'Initial release'
+        } else {
           $RANGE = "$PREV_TAG..HEAD"
           $CHANGELOG = git log --pretty=format:'- [`%h`](https://github.com/${{ github.repository }}/commit/%H) %s' $RANGE
-        } else {
-          $CHANGELOG = "Initial release"
         }
+
+        # Always write output and return success
         echo "changelog=$CHANGELOG" >> $env:GITHUB_OUTPUT
 
     - name: Create GitHub Release
