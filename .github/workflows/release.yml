@@ -31,8 +31,10 @@ jobs:
         pip install -r requirements.txt
 
     - name: Update version in ashita_manager.py
+      shell: powershell
       run: |
-        powershell -Command "(Get-Content ashita_manager.py) -replace '(?<=__version__ = \"")[^\"]*', '${{ github.event.inputs.version }}' | Set-Content ashita_manager.py"
+        $path = 'ashita_manager.py'
+        (Get-Content -Raw $path) -replace '(?<=__version__ = \")[^\"]*', '${{ github.event.inputs.version }}' | Set-Content $path
 
     - name: Build EXE with PyInstaller
       run: |
