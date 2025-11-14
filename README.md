@@ -1,7 +1,7 @@
 # Ashita Package Manager — Addons/Plugins and script manager for Ashita v4
 
 <p align="center">
-	<img src="assets/logo_fullpng" alt="Ashita Package Manager" width="700" style="max-width: 100%;"/>
+	<img src="https://github.com/loonsies/ashita-manager/blob/main/assets/logo_full.png?raw=true" alt="Ashita Package Manager" width="700" style="max-width: 100%;"/>
 </p>
 
 <h3 align="center" style="margin-bottom: 50px;">
@@ -23,3 +23,4 @@
 - If multiple branches exist, choose one
 - Use the Addons/Plugins tabs to update, remove, open repository, or view README
 - Open the Scripts tab to edit your Ashite script: toggle items, reorder, and save
+
