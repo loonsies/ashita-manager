@@ -74,6 +74,7 @@ jobs:
 
         # Always write output and return success
         echo "changelog=$CHANGELOG" >> $env:GITHUB_OUTPUT
+        exit 0
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
