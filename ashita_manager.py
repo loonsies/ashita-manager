@@ -323,6 +323,18 @@ class AshitaManagerUI(QMainWindow):
 
         ashita_path = self.package_tracker.get_setting('ashita_path', '')
 
+        self.init_ui()
+
+        try:
+            screen = QApplication.primaryScreen()
+            if screen:
+                scr = screen.availableGeometry()
+                x = scr.x() + (scr.width() - 900) // 2
+                y = scr.y() + (scr.height() - 700) // 2
+                self.setGeometry(max(x, 0), max(y, 0), 900, 700)
+        except Exception:
+            self.setGeometry(100, 100, 900, 700)
+
         try:
             self.show()
             QApplication.processEvents()
@@ -340,12 +352,29 @@ class AshitaManagerUI(QMainWindow):
         self.package_manager = PackageManager(self.ashita_root, self.package_tracker)
         self._centered = False
         self._first_launch = self.package_tracker.is_first_launch()
-        
+
         # Script manager
         self.current_script = None
         self.current_script_path = None
-        
-        self.init_ui()
+
+        try:
+            ashita_display = str(self.ashita_root)
+            branch_display = getattr(self.package_manager, 'official_repo_branch', 'main')
+            self.statusBar().showMessage(f"Ashita: {ashita_display} | Branch: {branch_display}")
+        except Exception:
+            pass
+
+        # Center the window before showing initial scan dialog
+        try:
+            screen = QApplication.primaryScreen()
+            if screen:
+                scr = screen.availableGeometry()
+                x = scr.x() + (scr.width() - self.width()) // 2
+                y = scr.y() + (scr.height() - self.height()) // 2
+                self.move(max(x, 0), max(y, 0))
+            self._centered = True
+        except Exception:
+            pass
 
         if self._first_launch:
             self.perform_initial_scan()
@@ -394,13 +423,12 @@ class AshitaManagerUI(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle("Ashita Package Manager")
-        self.setGeometry(100, 100, 900, 700)
-        
+
         # Central widget
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        
+
         # Installation section
         install_group = QGroupBox("Install new package")
         install_layout = QVBoxLayout()
@@ -410,27 +438,27 @@ class AshitaManagerUI(QMainWindow):
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("https://github.com/username/repo")
         url_layout.addWidget(self.url_input)
-        
+
         url_layout.addSpacing(10)
-        
+
         # Package type selector
         type_label = QLabel("Type:")
         url_layout.addWidget(type_label)
         self.type_selector = QComboBox()
         self.type_selector.addItems(["Auto", "Addon", "Plugin"])
         url_layout.addWidget(self.type_selector)
-        
+
         url_layout.addSpacing(10)
-        
+
         # Installation method selector
         method_label = QLabel("Method:")
         url_layout.addWidget(method_label)
         self.method_selector = QComboBox()
         self.method_selector.addItems(["Clone", "Release"])
         url_layout.addWidget(self.method_selector)
-        
+
         url_layout.addSpacing(10)
-        
+
         # Install button
         self.install_btn = QPushButton("Install")
         self.install_btn.clicked.connect(self.install_package)
@@ -438,29 +466,29 @@ class AshitaManagerUI(QMainWindow):
         if not icon.isNull():
             self.install_btn.setIcon(icon)
         url_layout.addWidget(self.install_btn)
-        
+
         install_layout.addLayout(url_layout)
         install_group.setLayout(install_layout)
         main_layout.addWidget(install_group)
-        
+
         # Package lists
         self.tabs = QTabWidget()
 
         # Addons tab
         addons_widget = QWidget()
         addons_layout = QVBoxLayout(addons_widget)
-        
+
         self.addons_search = QLineEdit()
         self.addons_search.setPlaceholderText("Search addons...")
         self.addons_search.textChanged.connect(lambda: self.filter_packages("addon"))
         addons_layout.addWidget(self.addons_search)
-        
+
         self.addons_list = QTreeWidget()
         self.addons_list.setHeaderHidden(True)
         self.addons_list.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.addons_list.itemClicked.connect(self.show_package_info)
         addons_layout.addWidget(self.addons_list)
-        
+
         # Addon buttons
         addon_buttons = QHBoxLayout()
         self.update_addon_btn = QPushButton("Update")
@@ -469,60 +497,60 @@ class AshitaManagerUI(QMainWindow):
             self.update_addon_btn.setIcon(icon)
         self.update_addon_btn.clicked.connect(lambda: self.update_package("addon"))
         addon_buttons.addWidget(self.update_addon_btn)
-        
+
         self.update_all_addons_btn = QPushButton("Update all")
         icon = self._std_icon('yes_all')
         if not icon.isNull():
             self.update_all_addons_btn.setIcon(icon)
         self.update_all_addons_btn.clicked.connect(lambda: self.batch_update("addon"))
         addon_buttons.addWidget(self.update_all_addons_btn)
-        
+
         self.remove_addon_btn = QPushButton("Remove")
         icon = self._std_icon('remove')
         if not icon.isNull():
             self.remove_addon_btn.setIcon(icon)
         self.remove_addon_btn.clicked.connect(lambda: self.remove_package("addon"))
         addon_buttons.addWidget(self.remove_addon_btn)
-        
+
         self.refresh_addon_btn = QPushButton("Refresh list")
         icon = self._std_icon('refresh')
         if not icon.isNull():
             self.refresh_addon_btn.setIcon(icon)
         self.refresh_addon_btn.clicked.connect(self.refresh_package_lists)
         addon_buttons.addWidget(self.refresh_addon_btn)
-        
+
         self.open_addon_repo_btn = QPushButton("Open repository")
         icon = self._std_icon('install')
         if not icon.isNull():
             self.open_addon_repo_btn.setIcon(icon)
         self.open_addon_repo_btn.clicked.connect(lambda: self.open_repository("addon"))
         addon_buttons.addWidget(self.open_addon_repo_btn)
-        
+
         self.open_addon_readme_btn = QPushButton("Open README")
         icon = self._std_icon('help')
         if not icon.isNull():
             self.open_addon_readme_btn.setIcon(icon)
         self.open_addon_readme_btn.clicked.connect(lambda: self.open_readme("addon"))
         addon_buttons.addWidget(self.open_addon_readme_btn)
-        
+
         addons_layout.addLayout(addon_buttons)
         self.tabs.addTab(addons_widget, "Addons (0)")
-        
+
         # Plugins tab
         plugins_widget = QWidget()
         plugins_layout = QVBoxLayout(plugins_widget)
-        
+
         self.plugins_search = QLineEdit()
         self.plugins_search.setPlaceholderText("Search plugins...")
         self.plugins_search.textChanged.connect(lambda: self.filter_packages("plugin"))
         plugins_layout.addWidget(self.plugins_search)
-        
+
         self.plugins_list = QTreeWidget()
         self.plugins_list.setHeaderHidden(True)
         self.plugins_list.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         self.plugins_list.itemClicked.connect(self.show_package_info)
         plugins_layout.addWidget(self.plugins_list)
-        
+
         # Plugin buttons
         plugin_buttons = QHBoxLayout()
         self.update_plugin_btn = QPushButton("Update")
@@ -531,56 +559,56 @@ class AshitaManagerUI(QMainWindow):
             self.update_plugin_btn.setIcon(icon)
         self.update_plugin_btn.clicked.connect(lambda: self.update_package("plugin"))
         plugin_buttons.addWidget(self.update_plugin_btn)
-        
+
         self.update_all_plugins_btn = QPushButton("Update all")
         icon = self._std_icon('yes_all')
         if not icon.isNull():
             self.update_all_plugins_btn.setIcon(icon)
         self.update_all_plugins_btn.clicked.connect(lambda: self.batch_update("plugin"))
         plugin_buttons.addWidget(self.update_all_plugins_btn)
-        
+
         self.remove_plugin_btn = QPushButton("Remove")
         icon = self._std_icon('remove')
         if not icon.isNull():
             self.remove_plugin_btn.setIcon(icon)
         self.remove_plugin_btn.clicked.connect(lambda: self.remove_package("plugin"))
         plugin_buttons.addWidget(self.remove_plugin_btn)
-        
+
         self.refresh_plugin_btn = QPushButton("Refresh list")
         icon = self._std_icon('refresh')
         if not icon.isNull():
             self.refresh_plugin_btn.setIcon(icon)
         self.refresh_plugin_btn.clicked.connect(self.refresh_package_lists)
         plugin_buttons.addWidget(self.refresh_plugin_btn)
-        
+
         self.open_plugin_repo_btn = QPushButton("Open repository")
         icon = self._std_icon('install')
         if not icon.isNull():
             self.open_plugin_repo_btn.setIcon(icon)
         self.open_plugin_repo_btn.clicked.connect(lambda: self.open_repository("plugin"))
         plugin_buttons.addWidget(self.open_plugin_repo_btn)
-        
+
         self.open_plugin_readme_btn = QPushButton("Open README")
         icon = self._std_icon('help')
         if not icon.isNull():
             self.open_plugin_readme_btn.setIcon(icon)
         self.open_plugin_readme_btn.clicked.connect(lambda: self.open_readme("plugin"))
         plugin_buttons.addWidget(self.open_plugin_readme_btn)
-        
+
         plugins_layout.addLayout(plugin_buttons)
         self.tabs.addTab(plugins_widget, "Plugins (0)")
-        
+
         # Script Manager tab
         script_widget = QWidget()
         script_main_layout = QVBoxLayout(script_widget)
-        
+
         # Script selector
         script_selector_layout = QHBoxLayout()
         script_selector_layout.addWidget(QLabel("Script file:"))
         self.script_selector = QComboBox()
         self.script_selector.currentTextChanged.connect(self.load_selected_script)
         script_selector_layout.addWidget(self.script_selector)
-        
+
         refresh_scripts_btn = QPushButton("Refresh")
         icon = self._std_icon('refresh')
         if not icon.isNull():
@@ -588,39 +616,39 @@ class AshitaManagerUI(QMainWindow):
         refresh_scripts_btn.clicked.connect(self.refresh_script_list)
         script_selector_layout.addWidget(refresh_scripts_btn)
         script_selector_layout.addStretch()
-        
+
         script_main_layout.addLayout(script_selector_layout)
-        
+
         # Scrollable content area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        
+
         script_content = QWidget()
         script_layout = QVBoxLayout(script_content)
-        
+
         # Plugins section - horizontal layout with two columns
         plugins_section = QHBoxLayout()
-        
+
         # Left: Plugins in Script
         self.script_plugins_group = QGroupBox("Plugins in script")
         plugins_group_layout = QVBoxLayout()
-        
+
         # Search bar for active plugins
         self.script_plugins_search = QLineEdit()
         self.script_plugins_search.setPlaceholderText("Search plugins in script...")
         self.script_plugins_search.textChanged.connect(lambda: self.filter_script_list('plugin'))
         plugins_group_layout.addWidget(self.script_plugins_search)
-        
+
         self.script_plugins_list = QTreeWidget()
         self.script_plugins_list.setHeaderHidden(True)
         self.script_plugins_list.setRootIsDecorated(False)  # Remove indentation for flat list
         self.script_plugins_list.setMinimumHeight(200)
         plugins_group_layout.addWidget(self.script_plugins_list)
-        
+
         # Connect itemChanged signal for plugins
         self.script_plugins_list.itemChanged.connect(lambda item, column: self.on_script_item_changed(item, column, 'plugin'))
-        
+
         plugins_buttons = QHBoxLayout()
         self.move_plugin_up_btn = QPushButton("Move up")
         self.move_plugin_up_btn.clicked.connect(lambda: self.move_script_item('plugin', -1))
@@ -628,75 +656,75 @@ class AshitaManagerUI(QMainWindow):
         if not icon.isNull():
             self.move_plugin_up_btn.setIcon(icon)
         plugins_buttons.addWidget(self.move_plugin_up_btn)
-        
+
         self.move_plugin_down_btn = QPushButton("Move down")
         self.move_plugin_down_btn.clicked.connect(lambda: self.move_script_item('plugin', 1))
         icon = self._std_icon('down')
         if not icon.isNull():
             self.move_plugin_down_btn.setIcon(icon)
         plugins_buttons.addWidget(self.move_plugin_down_btn)
-        
+
         self.remove_plugin_from_script_btn = QPushButton("Remove")
         self.remove_plugin_from_script_btn.clicked.connect(lambda: self.remove_from_script('plugin'))
         icon = self._std_icon('remove')
         if not icon.isNull():
             self.remove_plugin_from_script_btn.setIcon(icon)
         plugins_buttons.addWidget(self.remove_plugin_from_script_btn)
-        
+
         plugins_buttons.addStretch()
         plugins_group_layout.addLayout(plugins_buttons)
         self.script_plugins_group.setLayout(plugins_group_layout)
         plugins_section.addWidget(self.script_plugins_group)
-        
+
         # Right: Available Plugins (not in script)
         self.available_plugins_group = QGroupBox("Available Plugins (0)")
         available_plugins_layout = QVBoxLayout()
-        
+
         # Search bar for available plugins
         self.available_plugins_search = QLineEdit()
         self.available_plugins_search.setPlaceholderText("Search available plugins...")
         self.available_plugins_search.textChanged.connect(lambda: self.filter_available_list('plugin'))
         available_plugins_layout.addWidget(self.available_plugins_search)
-        
+
         self.available_plugins_list = QTreeWidget()
         self.available_plugins_list.setHeaderHidden(True)
         self.available_plugins_list.setMinimumHeight(200)
         available_plugins_layout.addWidget(self.available_plugins_list)
-        
+
         add_plugin_btn = QPushButton("Add to script")
         add_plugin_btn.clicked.connect(lambda: self.add_to_script('plugin'))
         icon = self._std_icon('add')
         if not icon.isNull():
             add_plugin_btn.setIcon(icon)
         available_plugins_layout.addWidget(add_plugin_btn)
-        
+
         self.available_plugins_group.setLayout(available_plugins_layout)
         plugins_section.addWidget(self.available_plugins_group)
-        
+
         script_layout.addLayout(plugins_section)
-        
+
         # Addons section - horizontal layout with two columns
         addons_section = QHBoxLayout()
-        
+
         # Left: Addons in Script
         self.script_addons_group = QGroupBox("Addons in script")
         addons_group_layout = QVBoxLayout()
-        
+
         # Search bar for active addons
         self.script_addons_search = QLineEdit()
         self.script_addons_search.setPlaceholderText("Search addons in script...")
         self.script_addons_search.textChanged.connect(lambda: self.filter_script_list('addon'))
         addons_group_layout.addWidget(self.script_addons_search)
-        
+
         self.script_addons_list = QTreeWidget()
         self.script_addons_list.setHeaderHidden(True)
         self.script_addons_list.setRootIsDecorated(False)  # Remove indentation for flat list
         self.script_addons_list.setMinimumHeight(200)
         addons_group_layout.addWidget(self.script_addons_list)
-        
+
         # Connect itemChanged signal for addons
         self.script_addons_list.itemChanged.connect(lambda item, column: self.on_script_item_changed(item, column, 'addon'))
-        
+
         addons_buttons = QHBoxLayout()
         self.move_addon_up_btn = QPushButton("Move up")
         self.move_addon_up_btn.clicked.connect(lambda: self.move_script_item('addon', -1))
@@ -704,63 +732,63 @@ class AshitaManagerUI(QMainWindow):
         if not icon.isNull():
             self.move_addon_up_btn.setIcon(icon)
         addons_buttons.addWidget(self.move_addon_up_btn)
-        
+
         self.move_addon_down_btn = QPushButton("Move Down")
         self.move_addon_down_btn.clicked.connect(lambda: self.move_script_item('addon', 1))
         icon = self._std_icon('down')
         if not icon.isNull():
             self.move_addon_down_btn.setIcon(icon)
         addons_buttons.addWidget(self.move_addon_down_btn)
-        
+
         self.remove_addon_from_script_btn = QPushButton("Remove")
         self.remove_addon_from_script_btn.clicked.connect(lambda: self.remove_from_script('addon'))
         icon = self._std_icon('remove')
         if not icon.isNull():
             self.remove_addon_from_script_btn.setIcon(icon)
         addons_buttons.addWidget(self.remove_addon_from_script_btn)
-        
+
         addons_buttons.addStretch()
         addons_group_layout.addLayout(addons_buttons)
         self.script_addons_group.setLayout(addons_group_layout)
         addons_section.addWidget(self.script_addons_group)
-        
+
         # Right: Available Addons (not in script)
         self.available_addons_group = QGroupBox("Available Addons (0)")
         available_addons_layout = QVBoxLayout()
-        
+
         # Search bar for available addons
         self.available_addons_search = QLineEdit()
         self.available_addons_search.setPlaceholderText("Search available addons...")
         self.available_addons_search.textChanged.connect(lambda: self.filter_available_list('addon'))
         available_addons_layout.addWidget(self.available_addons_search)
-        
+
         self.available_addons_list = QTreeWidget()
         self.available_addons_list.setHeaderHidden(True)
         self.available_addons_list.setMinimumHeight(200)
         available_addons_layout.addWidget(self.available_addons_list)
-        
+
         add_addon_btn = QPushButton("Add to script")
         add_addon_btn.clicked.connect(lambda: self.add_to_script('addon'))
         icon = self._std_icon('add')
         if not icon.isNull():
             add_addon_btn.setIcon(icon)
         available_addons_layout.addWidget(add_addon_btn)
-        
+
         self.available_addons_group.setLayout(available_addons_layout)
         addons_section.addWidget(self.available_addons_group)
-        
+
         script_layout.addLayout(addons_section)
-        
+
         # Exec section
         self.script_exec_group = QGroupBox("Execute scripts (Keybinds/Aliases)")
         exec_group_layout = QVBoxLayout()
         self.script_exec_list = QListWidget()
         self.script_exec_list.setMaximumHeight(120)
         exec_group_layout.addWidget(self.script_exec_list)
-        
+
         # Connect item change to update enabled state
         self.script_exec_list.itemChanged.connect(lambda item: self.on_script_item_changed(item, None, 'exec'))
-        
+
         exec_buttons = QHBoxLayout()
         self.add_exec_btn = QPushButton("Add Keybind/Alias")
         self.add_exec_btn.clicked.connect(self.add_exec_command)
@@ -768,19 +796,19 @@ class AshitaManagerUI(QMainWindow):
         if not icon.isNull():
             self.add_exec_btn.setIcon(icon)
         exec_buttons.addWidget(self.add_exec_btn)
-        
+
         self.remove_exec_btn = QPushButton("Remove")
         self.remove_exec_btn.clicked.connect(self.remove_exec_command)
         icon = self._std_icon('remove')
         if not icon.isNull():
             self.remove_exec_btn.setIcon(icon)
         exec_buttons.addWidget(self.remove_exec_btn)
-        
+
         exec_buttons.addStretch()
         exec_group_layout.addLayout(exec_buttons)
         self.script_exec_group.setLayout(exec_group_layout)
         script_layout.addWidget(self.script_exec_group)
-        
+
         # Wait time section
         wait_group = QGroupBox("Wait time (seconds)")
         wait_layout = QHBoxLayout()
@@ -793,17 +821,17 @@ class AshitaManagerUI(QMainWindow):
         wait_layout.addStretch()
         wait_group.setLayout(wait_layout)
         script_layout.addWidget(wait_group)
-        
+
         # Config commands section
         self.script_config_group = QGroupBox("Configuration commands")
         config_group_layout = QVBoxLayout()
         self.script_config_list = QListWidget()
         self.script_config_list.setMaximumHeight(150)
         config_group_layout.addWidget(self.script_config_list)
-        
+
         # Connect item change to update enabled state
         self.script_config_list.itemChanged.connect(lambda item: self.on_script_item_changed(item, None, 'config'))
-        
+
         config_buttons = QHBoxLayout()
         self.add_config_btn = QPushButton("Add Command")
         self.add_config_btn.clicked.connect(self.add_config_command)
@@ -811,23 +839,23 @@ class AshitaManagerUI(QMainWindow):
         if not icon.isNull():
             self.add_config_btn.setIcon(icon)
         config_buttons.addWidget(self.add_config_btn)
-        
+
         self.remove_config_btn = QPushButton("Remove")
-        self.remove_config_btn.clicked.connect(self.remove_config_command)
+        self.remove_config_btn.clicked.connect(lambda: self.remove_config_command)
         icon = self._std_icon('remove')
         if not icon.isNull():
             self.remove_config_btn.setIcon(icon)
         config_buttons.addWidget(self.remove_config_btn)
-        
+
         config_buttons.addStretch()
         config_group_layout.addLayout(config_buttons)
         self.script_config_group.setLayout(config_group_layout)
         script_layout.addWidget(self.script_config_group)
-        
+
         script_layout.addStretch()
         scroll.setWidget(script_content)
         script_main_layout.addWidget(scroll)
-        
+
         # Save button
         save_script_layout = QHBoxLayout()
         save_script_layout.addStretch()
@@ -838,14 +866,14 @@ class AshitaManagerUI(QMainWindow):
             self.save_script_btn.setIcon(icon)
         save_script_layout.addWidget(self.save_script_btn)
         script_main_layout.addLayout(save_script_layout)
-        
+
         self.tabs.addTab(script_widget, "Scripts")
-        
+
         main_layout.addWidget(self.tabs)
-        
+
         # Connect tab change to hide/show info panel
         self.tabs.currentChanged.connect(self.on_tab_changed)
-        
+
         # Info panel
         self.info_group = QGroupBox("Package information")
         info_layout = QVBoxLayout()
@@ -855,7 +883,7 @@ class AshitaManagerUI(QMainWindow):
         info_layout.addWidget(self.info_text)
         self.info_group.setLayout(info_layout)
         main_layout.addWidget(self.info_group)
-        
+
         # Log window
         log_group = QGroupBox("Activity log")
         log_layout = QVBoxLayout()
@@ -863,7 +891,7 @@ class AshitaManagerUI(QMainWindow):
         self.log_text.setReadOnly(True)
         self.log_text.setMaximumHeight(150)
         log_layout.addWidget(self.log_text)
-        
+
         # Log controls
         log_controls = QHBoxLayout()
         self.clear_log_btn = QPushButton("Clear log")
@@ -872,7 +900,7 @@ class AshitaManagerUI(QMainWindow):
         if not icon.isNull():
             self.clear_log_btn.setIcon(icon)
         log_controls.addWidget(self.clear_log_btn)
-        
+
         # Settings button
         self.settings_btn = QPushButton("Settings")
         self.settings_btn.clicked.connect(self.open_settings)
@@ -880,23 +908,26 @@ class AshitaManagerUI(QMainWindow):
         if not icon.isNull():
             self.settings_btn.setIcon(icon)
         log_controls.addWidget(self.settings_btn)
-        
+
         log_controls.addStretch()
         log_layout.addLayout(log_controls)
-        
+
         log_group.setLayout(log_layout)
         main_layout.addWidget(log_group)
-        
+
         # Initial log message
         self.log("Ashita Package Manager started")
-        
+
         # Footer: Ashita folder and branch
-        try:
-            ashita_display = str(self.ashita_root)
-            branch_display = getattr(self.package_manager, 'official_repo_branch', 'main')
-            self.statusBar().showMessage(f"Ashita: {ashita_display} | Branch: {branch_display}")
-        except Exception:
-            pass
+        if hasattr(self, 'ashita_root') and self.ashita_root:
+            try:
+                ashita_display = str(self.ashita_root)
+                branch_display = getattr(self.package_manager, 'official_repo_branch', 'main')
+                self.statusBar().showMessage(f"Ashita: {ashita_display} | Branch: {branch_display}")
+            except Exception:
+                pass
+        else:
+            self.statusBar().showMessage('Waiting for initialization...')
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2238,6 +2269,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
