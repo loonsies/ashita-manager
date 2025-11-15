@@ -12,15 +12,13 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QComboBox, QListWidget, QListWidgetItem, QTabWidget,
                              QMessageBox, QProgressDialog, QGroupBox, QTextEdit,
                              QDialog, QDialogButtonBox, QFormLayout, QFileDialog,
-                             QSpinBox, QCheckBox, QScrollArea, QInputDialog, QStyle,
+                             QSpinBox, QScrollArea, QInputDialog, QStyle,
                              QTreeWidget, QTreeWidgetItem)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QByteArray, QBuffer, QUrl, QCoreApplication, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QIcon, QGuiApplication
 
 # Try to import WebEngine for markdown rendering
 try:
-    from PyQt6.QtWebEngineWidgets import QWebEngineView
-    from PyQt6.QtWebEngineCore import QWebEnginePage
     from markdown_viewer import MarkdownViewer
     WEBENGINE_AVAILABLE = True
 except ImportError:

@@ -4,10 +4,8 @@ Manages the ashita-packages.json file to track installed packages
 """
 
 import json
-import os
 from pathlib import Path
 from datetime import datetime
-
 
 class PackageTracker:
     def __init__(self, ashita_root):

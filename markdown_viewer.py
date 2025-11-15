@@ -3,7 +3,6 @@ Markdown Viewer
 Displays markdown content with support for remote images using QWebEngineView and marked.js
 """
 
-import os
 from pathlib import Path
 from PyQt6.QtCore import pyqtProperty, pyqtSignal, QObject, QUrl
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
@@ -11,7 +10,6 @@ from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
-
 
 class Document(QObject):
     """Document object for web channel communication"""

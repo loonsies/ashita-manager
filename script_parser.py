@@ -1,6 +1,4 @@
 import os
-import re
-
 
 class ScriptParser:
     def __init__(self, script_path):

@@ -3,9 +3,7 @@ Folder Structure Detector
 Detects different folder structures for addons and plugins
 """
 
-import os
 from pathlib import Path
-
 
 class FolderStructureDetector:
     def __init__(self):
