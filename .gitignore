@@ -1,7 +1,7 @@
 .zed
 .vscode
 *.pyc
-ashita_packages.json
+ashita-packages.json
 
 # PyInstaller
 dist/
