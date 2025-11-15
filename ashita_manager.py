@@ -322,7 +322,13 @@ class AshitaManagerUI(QMainWindow):
         self.package_tracker = PackageTracker(base_dir)
 
         ashita_path = self.package_tracker.get_setting('ashita_path', '')
-        
+
+        try:
+            self.show()
+            QApplication.processEvents()
+        except Exception:
+            pass
+
         if not ashita_path:
             ashita_path = self._prompt_for_ashita_path()
             if not ashita_path:
