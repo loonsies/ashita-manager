@@ -303,9 +303,22 @@ class AshitaManagerUI(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.package_tracker = PackageTracker(script_dir)
-        
+        # base directory based on whether frozen (bundled) or not
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Set application icon
+        try:
+            icon_path = os.path.join(base_dir, 'assets', 'logo.png')
+            if os.path.exists(icon_path):
+                QApplication.setWindowIcon(QIcon(icon_path))
+        except Exception:
+            pass
+
+        self.package_tracker = PackageTracker(base_dir)
+
         ashita_path = self.package_tracker.get_setting('ashita_path', '')
         
         if not ashita_path:
@@ -374,11 +387,6 @@ class AshitaManagerUI(QMainWindow):
         """Initialize the user interface"""
         self.setWindowTitle("Ashita Package Manager")
         self.setGeometry(100, 100, 900, 700)
-        
-        # Set application icon
-        icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'logo.png')
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
         
         # Central widget
         central_widget = QWidget()

@@ -32,6 +32,12 @@ class PackageManager:
         self.addons_dir.mkdir(exist_ok=True)
         self.plugins_dir.mkdir(exist_ok=True)
         self.docs_dir.mkdir(exist_ok=True)
+
+    def _run_command(self, cmd, cwd=None, **kwargs):
+        """Run a subprocess command while avoiding creating a new console window on Windows."""
+        if os.name == 'nt':
+            kwargs.setdefault('creationflags', subprocess.CREATE_NO_WINDOW)
+        return subprocess.run(cmd, cwd=cwd, **kwargs)
     
     def _handle_remove_readonly(self, func, path, exc):
         """Error handler for Windows file deletion issues"""
@@ -57,7 +63,7 @@ class PackageManager:
             except Exception:
                 # Last resort: use Windows rmdir command
                 if os.name == 'nt':
-                    subprocess.run(
+                    self._run_command(
                         ['cmd', '/c', 'rmdir', '/S', '/Q', str(path)],
                         capture_output=True
                     )
@@ -67,7 +73,7 @@ class PackageManager:
     def _detect_current_branch(self):
         """Detect the current git branch of the Ashita installation"""
         try:
-            result = subprocess.run(
+            result = self._run_command(
                 ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
                 cwd=self.ashita_root,
                 capture_output=True,
@@ -105,7 +111,7 @@ class PackageManager:
                 clone_cmd.extend([url, str(temp_path / 'repo')])
                 
                 # Clone repository
-                result = subprocess.run(
+                result = self._run_command(
                     clone_cmd,
                     capture_output=True,
                     text=True
@@ -117,7 +123,7 @@ class PackageManager:
                 repo_path = temp_path / 'repo'
                 
                 # Get commit hash
-                commit_result = subprocess.run(
+                commit_result = self._run_command(
                     ['git', 'rev-parse', 'HEAD'],
                     cwd=repo_path,
                     capture_output=True,
@@ -126,7 +132,7 @@ class PackageManager:
                 commit_hash = commit_result.stdout.strip()
                 
                 # Get branch name
-                branch_result = subprocess.run(
+                branch_result = self._run_command(
                     ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
                     cwd=repo_path,
                     capture_output=True,
@@ -282,7 +288,7 @@ class PackageManager:
                 # For monorepos, get folder-specific commit
                 if url == self.official_repo:
                     folder_path = f'addons/{addon_name}'
-                    folder_commit_result = subprocess.run(
+                    folder_commit_result = self._run_command(
                         ['git', 'log', '-1', '--format=%H', '--', folder_path],
                         cwd=repo_root,
                         capture_output=True,
@@ -360,7 +366,7 @@ class PackageManager:
                 # For monorepos, get folder-specific commit
                 if url == self.official_repo:
                     folder_path = f'addons/{addon_name}'
-                    folder_commit_result = subprocess.run(
+                    folder_commit_result = self._run_command(
                         ['git', 'log', '-1', '--format=%H', '--', folder_path],
                         cwd=source_path,
                         capture_output=True,
@@ -424,7 +430,7 @@ class PackageManager:
                 if url == self.official_repo:
                     # For plugins, the path in git is to the dll file
                     folder_path = f'plugins/{plugin_name}.dll'
-                    folder_commit_result = subprocess.run(
+                    folder_commit_result = self._run_command(
                         ['git', 'log', '-1', '--format=%H', '--', folder_path],
                         cwd=source_path,
                         capture_output=True,
@@ -842,7 +848,7 @@ class PackageManager:
     def _get_folder_commit_hash(self, folder_path):
         """Get the last commit hash that affected a specific folder"""
         try:
-            result = subprocess.run(
+            result = self._run_command(
                 ['git', 'log', '-1', '--format=%H', '--', str(folder_path)],
                 cwd=self.ashita_root,
                 capture_output=True,
@@ -1091,7 +1097,7 @@ class PackageManager:
                 temp_path = Path(temp_dir)
                 
                 # Clone repository with depth 1 for speed
-                result = subprocess.run(
+                result = self._run_command(
                     ['git', 'clone', '--depth', '1', url, str(temp_path / 'repo')],
                     capture_output=True,
                     text=True,
@@ -1124,7 +1130,7 @@ class PackageManager:
         Returns a list of branch names (strings) or an empty list on failure.
         """
         try:
-            result = subprocess.run(
+            result = self._run_command(
                 ['git', 'ls-remote', '--heads', repo_url],
                 capture_output=True,
                 text=True,
