@@ -34,9 +34,10 @@ class InstallWorker(QThread):
     """Worker thread for package installation"""
     finished = pyqtSignal(bool, str)
     conflict_detected = pyqtSignal(dict)
+    variant_selection_requested = pyqtSignal(dict)
     progress = pyqtSignal(str)
     
-    def __init__(self, package_manager, url, pkg_type, install_method, branch=None, force=False):
+    def __init__(self, package_manager, url, pkg_type, install_method, branch=None, force=False, plugin_variant=None):
         super().__init__()
         self.package_manager = package_manager
         self.url = url
@@ -44,20 +45,24 @@ class InstallWorker(QThread):
         self.install_method = install_method
         self.branch = branch
         self.force = force
+        self.plugin_variant = plugin_variant
     
     def run(self):
         try:
             if self.install_method == "Clone":
                 self.progress.emit(f"Cloning repository from {self.url}...")
-                result = self.package_manager.install_from_git(self.url, self.pkg_type, branch=self.branch, force=self.force)
+                result = self.package_manager.install_from_git(self.url, self.pkg_type, branch=self.branch, force=self.force, plugin_variant=self.plugin_variant)
             else:  # Release
                 self.progress.emit(f"Downloading release from {self.url}...")
-                result = self.package_manager.install_from_release(self.url, self.pkg_type, force=self.force)
+                result = self.package_manager.install_from_release(self.url, self.pkg_type, force=self.force, plugin_variant=self.plugin_variant)
             
             if result['success']:
                 self.finished.emit(True, result['message'])
             elif result.get('requires_confirmation'):
                 self.conflict_detected.emit(result)
+            elif result.get('requires_variant_selection'):
+                # Inform UI to prompt user for variant selection
+                self.variant_selection_requested.emit(result)
             else:
                 self.finished.emit(False, result['error'])
         except Exception as e:
@@ -1138,11 +1143,12 @@ class AshitaManagerUI(QMainWindow):
             # Update stored branch parameter
             self._last_install_params['branch'] = branch
 
-        self.worker = InstallWorker(self.package_manager, url, pkg_type, install_method, branch=branch)
+        self.worker = InstallWorker(self.package_manager, url, pkg_type, install_method, branch=branch, plugin_variant=None)
         self.worker.progress.connect(self.update_progress)
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.install_finished)
         self.worker.conflict_detected.connect(self.handle_install_conflict)
+        self.worker.variant_selection_requested.connect(self.handle_variant_selection)
         self.worker.start()
     
     def update_progress(self, message):
@@ -1271,11 +1277,56 @@ class AshitaManagerUI(QMainWindow):
         self.progress.setWindowModality(Qt.WindowModality.WindowModal)
         self.progress.show()
         
-        self.worker = InstallWorker(self.package_manager, url, pkg_type, install_method, branch=branch, force=True)
+        self.worker = InstallWorker(self.package_manager, url, pkg_type, install_method, branch=branch, force=True, plugin_variant=None)
         self.worker.progress.connect(self.update_progress)
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.install_finished)
         self.worker.conflict_detected.connect(self.handle_install_conflict)  # In case nested conflicts occur
+        self.worker.variant_selection_requested.connect(self.handle_variant_selection)
+        self.worker.start()
+
+    def handle_variant_selection(self, result):
+        """Prompt the user to select a plugin variant when backend requests it."""
+        # Close current progress dialog so the selection UI is visible and not blocked
+        try:
+            self.progress.close()
+        except Exception:
+            pass
+
+        variants = result.get('variants', [])
+        if not variants:
+            return
+
+        choices = [v.get('name') for v in variants]
+        choice, ok = QInputDialog.getItem(self, "Select plugin variant", "Select variant to install:", choices, 0, False)
+        if not ok:
+            self.log("Variant selection cancelled by user")
+            return
+
+        # Retry installation with the chosen variant
+        self._retry_install_with_variant(choice)
+
+    def _retry_install_with_variant(self, variant_name):
+        if not hasattr(self, '_last_install_params'):
+            self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Installation parameters not found")
+            return
+
+        params = self._last_install_params
+        url = params['url']
+        pkg_type = params['pkg_type']
+        install_method = params['install_method']
+        branch = params.get('branch')
+
+        self.progress = QProgressDialog("Installing package...", None, 0, 0, self)
+        self.progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress.show()
+
+        self.worker = InstallWorker(self.package_manager, url, pkg_type, install_method, branch=branch, force=False, plugin_variant=variant_name)
+        self.worker.progress.connect(self.update_progress)
+        self.worker.progress.connect(self.log)
+        self.worker.finished.connect(self.install_finished)
+        self.worker.conflict_detected.connect(self.handle_install_conflict)
+        self.worker.variant_selection_requested.connect(self.handle_variant_selection)
         self.worker.start()
     
     def refresh_package_lists(self):

@@ -89,7 +89,7 @@ class PackageManager:
         # Default to main if detection fails
         return 'main'
     
-    def install_from_git(self, url, pkg_type, target_package_name=None, branch=None, force=False):
+    def install_from_git(self, url, pkg_type, target_package_name=None, branch=None, force=False, plugin_variant=None):
         """Install a package by cloning from git
         
         Args:
@@ -207,14 +207,92 @@ class PackageManager:
                         # Single addon
                         result = self._install_addon(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force)
                 else:
-                    result = self._install_plugin(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force)
+                    # Plugin repo: look for variant folders containing .dll files
+                    variants = []
+                    try:
+                        for p in repo_path.rglob('*'):
+                            if p.is_dir():
+                                dlls = list(p.glob('*.dll'))
+                                if dlls:
+                                    variants.append({'path': p, 'name': p.name, 'dlls': dlls})
+                    except Exception:
+                        variants = []
+
+                    sel_path = None
+                    sel_dlls = []
+                    sel_name = None
+
+                    if plugin_variant:
+                        # try to match provided variant by folder name
+                        for v in variants:
+                            if v['name'] == plugin_variant:
+                                sel_path = v['path']
+                                sel_dlls = v['dlls']
+                                sel_name = v['name']
+                                break
+                        if not sel_path:
+                            return {'success': False, 'error': f'Plugin variant "{plugin_variant}" not found in repository'}
+                    else:
+                        if variants:
+                            if len(variants) == 1:
+                                sel_path = variants[0]['path']
+                                sel_dlls = variants[0]['dlls']
+                                sel_name = variants[0]['name']
+                            else:
+                                # multiple variants found, request UI selection
+                                choices = [{'name': v['name'], 'version': None} for v in variants]
+                                return {
+                                    'success': False,
+                                    'requires_variant_selection': True,
+                                    'variants': choices,
+                                    'repo_url': url
+                                }
+                        else:
+                            # no variant folders found; fall back to standard plugin installer
+                            return self._install_plugin(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force)
+
+                    # If we have a selected path with DLLs, install first DLL
+                    if sel_path and sel_dlls:
+                        dll_path = sel_dlls[0]
+                        plugin_name = dll_path.stem
+                        target_dll = self.plugins_dir / f"{plugin_name}.dll"
+
+                        if target_dll.exists():
+                            existing_pkg = self.package_tracker.get_package(plugin_name, 'plugin')
+                            if existing_pkg and existing_pkg.get('source') == self.official_repo and url == self.official_repo:
+                                target_dll.unlink()
+                            else:
+                                return {'success': False, 'error': f'Plugin "{plugin_name}.dll" already exists'}
+
+                        shutil.copy2(dll_path, target_dll)
+
+                        package_info = {
+                            'source': url,
+                            'install_method': 'git',
+                            'installed_date': datetime.now().isoformat(),
+                            'path': str(target_dll.relative_to(self.ashita_root))
+                        }
+                        if commit_hash:
+                            package_info['commit'] = commit_hash
+                            package_info['branch'] = branch_name
+
+                        if sel_name:
+                            package_info['variant_version'] = sel_name
+
+                        self.package_tracker.add_package(plugin_name, 'plugin', package_info)
+                        try:
+                            self._copy_extra_folders(sel_path, plugin_name, pkg_type='plugin')
+                        except Exception:
+                            pass
+                        self.package_tracker.save_packages()
+                        return {'success': True, 'message': f'Plugin "{plugin_name}" installed successfully'}
                 
                 return result
                 
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def install_from_release(self, url, pkg_type, force=False):
+    def install_from_release(self, url, pkg_type, force=False, plugin_variant=None):
         try:
             release_url = self._get_latest_release_url(url)
             
@@ -244,7 +322,82 @@ class PackageManager:
                 if pkg_type == 'addon':
                     result = self._install_addon(extract_path, url, None, None, release_tag, force=force)
                 else:
-                    result = self._install_plugin(extract_path, url, None, None, release_tag, force=force)
+                    # Search extracted tree for variant folders containing DLLs
+                    variants = []
+                    try:
+                        for p in extract_path.rglob('*'):
+                            if p.is_dir():
+                                dlls = list(p.glob('*.dll'))
+                                if dlls:
+                                    variants.append({'path': p, 'name': p.name, 'dlls': dlls})
+                    except Exception:
+                        variants = []
+
+                    sel_path = None
+                    sel_dlls = []
+                    sel_name = None
+
+                    if plugin_variant:
+                        chosen = None
+                        for v in variants:
+                            if v['name'] == plugin_variant:
+                                chosen = v
+                                break
+                        if chosen:
+                            sel_path = chosen['path']
+                            sel_dlls = chosen['dlls']
+                            sel_name = chosen['name']
+                        else:
+                            return {'success': False, 'error': f'Plugin variant "{plugin_variant}" not found in release'}
+                    else:
+                        if variants:
+                            if len(variants) == 1:
+                                sel_path = variants[0]['path']
+                                sel_dlls = variants[0]['dlls']
+                                sel_name = variants[0]['name']
+                            else:
+                                choices = [{'name': v['name'], 'version': None} for v in variants]
+                                return {
+                                    'success': False,
+                                    'requires_variant_selection': True,
+                                    'variants': choices,
+                                    'repo_url': url
+                                }
+                        else:
+                            # No variants found; fallback to installer
+                            return self._install_plugin(extract_path, url, None, None, release_tag, force=force)
+
+                    if sel_path and sel_dlls:
+                        dll_path = sel_dlls[0]
+                        plugin_name = dll_path.stem
+                        target_dll = self.plugins_dir / f"{plugin_name}.dll"
+
+                        if target_dll.exists():
+                            existing_pkg = self.package_tracker.get_package(plugin_name, 'plugin')
+                            if existing_pkg and existing_pkg.get('source') == self.official_repo and url == self.official_repo:
+                                target_dll.unlink()
+                            else:
+                                return {'success': False, 'error': f'Plugin "{plugin_name}.dll" already exists'}
+
+                        shutil.copy2(dll_path, target_dll)
+
+                        package_info = {
+                            'source': url,
+                            'install_method': 'release',
+                            'installed_date': datetime.now().isoformat(),
+                            'path': str(target_dll.relative_to(self.ashita_root)),
+                            'release_tag': release_tag
+                        }
+                        if sel_name:
+                            package_info['variant_version'] = sel_name
+
+                        self.package_tracker.add_package(plugin_name, 'plugin', package_info)
+                        try:
+                            self._copy_extra_folders(sel_path, plugin_name, pkg_type='plugin')
+                        except Exception:
+                            pass
+                        self.package_tracker.save_packages()
+                        return {'success': True, 'message': f'Plugin "{plugin_name}" installed successfully'}
                 
                 return result
                 
