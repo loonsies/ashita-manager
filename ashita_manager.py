@@ -305,13 +305,15 @@ class AshitaManagerUI(QMainWindow):
         
         # base directory based on whether frozen (bundled) or not
         if getattr(sys, 'frozen', False):
+            resource_dir = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
             base_dir = os.path.dirname(sys.executable)
         else:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
+            resource_dir = os.path.dirname(os.path.abspath(__file__))
+            base_dir = resource_dir
 
         # Set application icon
         try:
-            icon_path = os.path.join(base_dir, 'assets', 'logo.png')
+            icon_path = os.path.join(resource_dir, 'assets', 'logo.png')
             if os.path.exists(icon_path):
                 QApplication.setWindowIcon(QIcon(icon_path))
         except Exception:
