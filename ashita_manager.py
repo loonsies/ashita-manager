@@ -1671,7 +1671,14 @@ class AshitaManagerUI(QMainWindow):
                         dialog = QDialog(self)
                         dialog.setWindowTitle(f"{package_name} - README")
                         dialog.setMinimumSize(800, 600)
-                        
+                        try:
+                            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+                            dialog.setModal(False)
+                            dialog.setWindowModality(Qt.WindowModality.NonModal)
+                            dialog.setWindowFlag(Qt.WindowType.Window, True)
+                        except Exception:
+                            pass
+
                         layout = QVBoxLayout(dialog)
                         
                         # Determine content type
@@ -1703,10 +1710,9 @@ class AshitaManagerUI(QMainWindow):
                         close_btn = QPushButton("Close")
                         close_btn.clicked.connect(dialog.close)
                         layout.addWidget(close_btn)
-                        
-                        dialog.show()
+
                         self._center_widget(dialog)
-                        dialog.exec()
+                        dialog.show()
                         
                     except Exception as e:
                         self._show_centered_message(QMessageBox.Icon.Critical, "Error", f"Failed to read README:\n{str(e)}")
