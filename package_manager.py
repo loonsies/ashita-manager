@@ -4,6 +4,7 @@ Handles installation, updates, and removal of Ashita addons and plugins
 """
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -276,12 +277,9 @@ class PackageManager:
                             package_info['commit'] = commit_hash
                             package_info['branch'] = branch_name
 
-                        if sel_name:
-                            package_info['variant_version'] = sel_name
-
                         self.package_tracker.add_package(plugin_name, 'plugin', package_info)
                         try:
-                            self._copy_extra_folders(sel_path, plugin_name, pkg_type='plugin')
+                            self._copy_extra_folders(repo_path, plugin_name, pkg_type='plugin')
                         except Exception:
                             pass
                         self.package_tracker.save_packages()
@@ -292,21 +290,40 @@ class PackageManager:
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def install_from_release(self, url, pkg_type, force=False, plugin_variant=None):
+    def install_from_release(self, url, pkg_type, force=False, plugin_variant=None, asset_download_url=None, asset_name=None):
         try:
-            release_url = self._get_latest_release_url(url)
+            if asset_download_url:
+                release_url = (asset_download_url, asset_name or self._infer_asset_name(asset_download_url))
+            else:
+                release_url = self._get_latest_release_url(url, preferred_asset_name=asset_name)
             
-            if isinstance(release_url, dict) and release_url.get('error') == 'rate_limit':
-                return {'success': False, 'error': release_url.get('message', 'GitHub API rate limit exceeded')}
+            if isinstance(release_url, dict):
+                if release_url.get('error') == 'rate_limit':
+                    return {'success': False, 'error': release_url.get('message', 'GitHub API rate limit exceeded')}
+                elif release_url.get('multiple_assets'):
+                    assets = release_url['assets']
+                    return {
+                        'success': False,
+                        'requires_variant_selection': True,
+                        'variants': [{'name': a['name'], 'version': a['name'], 'url': a.get('url') or a.get('download_url') or a.get('browser_download_url')} for a in assets],
+                        'repo_url': url,
+                        'is_release_asset': True
+                    }
             
             if not release_url:
                 return {'success': False, 'error': 'Could not find release download URL'}
+
+            if isinstance(release_url, tuple):
+                download_url, release_asset_name = release_url
+            else:
+                download_url = release_url
+                release_asset_name = asset_name or self._infer_asset_name(release_url)
             
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
                 zip_path = temp_path / 'release.zip'
                 
-                response = requests.get(release_url, stream=True)
+                response = requests.get(download_url, stream=True)
                 response.raise_for_status()
                 
                 with open(zip_path, 'wb') as f:
@@ -320,7 +337,15 @@ class PackageManager:
                 release_tag = self._get_release_tag(url)
                 
                 if pkg_type == 'addon':
-                    result = self._install_addon(extract_path, url, None, None, release_tag, force=force)
+                    result = self._install_addon(
+                        extract_path,
+                        url,
+                        None,
+                        None,
+                        release_tag,
+                        force=force,
+                        release_asset_name=release_asset_name
+                    )
                 else:
                     # Search extracted tree for variant folders containing DLLs
                     variants = []
@@ -365,7 +390,15 @@ class PackageManager:
                                 }
                         else:
                             # No variants found; fallback to installer
-                            return self._install_plugin(extract_path, url, None, None, release_tag, force=force)
+                            return self._install_plugin(
+                                extract_path,
+                                url,
+                                None,
+                                None,
+                                release_tag,
+                                force=force,
+                                release_asset_name=release_asset_name
+                            )
 
                     if sel_path and sel_dlls:
                         dll_path = sel_dlls[0]
@@ -388,12 +421,11 @@ class PackageManager:
                             'path': str(target_dll.relative_to(self.ashita_root)),
                             'release_tag': release_tag
                         }
-                        if sel_name:
-                            package_info['variant_version'] = sel_name
-
+                        if release_asset_name:
+                            package_info['release_asset_name'] = release_asset_name
                         self.package_tracker.add_package(plugin_name, 'plugin', package_info)
                         try:
-                            self._copy_extra_folders(sel_path, plugin_name, pkg_type='plugin')
+                            self._copy_extra_folders(extract_path, plugin_name, pkg_type='plugin')
                         except Exception:
                             pass
                         self.package_tracker.save_packages()
@@ -404,7 +436,7 @@ class PackageManager:
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def _install_single_addon(self, addon_info, url, commit_hash=None, branch_name=None, release_tag=None, repo_root=None, force=False):
+    def _install_single_addon(self, addon_info, url, commit_hash=None, branch_name=None, release_tag=None, repo_root=None, force=False, release_asset_name=None):
         """Install a single addon from addon_info dict (used for monorepos)"""
         try:
             addon_name = addon_info['name']
@@ -436,6 +468,9 @@ class PackageManager:
                 'installed_date': datetime.now().isoformat(),
                 'path': str(target_dir.relative_to(self.ashita_root))
             }
+
+            if release_asset_name:
+                package_info['release_asset_name'] = release_asset_name
             
             if commit_hash:
                 # For monorepos, get folder-specific commit
@@ -475,7 +510,7 @@ class PackageManager:
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def _install_addon(self, source_path, url, commit_hash=None, branch_name=None, release_tag=None, target_name=None, force=False):
+    def _install_addon(self, source_path, url, commit_hash=None, branch_name=None, release_tag=None, target_name=None, force=False, release_asset_name=None):
         try:
             repo_root = source_path
             addon_info = self.detector.detect_addon_structure(source_path, target_name)
@@ -514,6 +549,9 @@ class PackageManager:
                 'installed_date': datetime.now().isoformat(),
                 'path': str(target_dir.relative_to(self.ashita_root))
             }
+
+            if release_asset_name:
+                package_info['release_asset_name'] = release_asset_name
             
             if commit_hash:
                 # For monorepos, get folder-specific commit
@@ -548,7 +586,7 @@ class PackageManager:
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def _install_plugin(self, source_path, url, commit_hash=None, branch_name=None, release_tag=None, target_name=None, force=False):
+    def _install_plugin(self, source_path, url, commit_hash=None, branch_name=None, release_tag=None, target_name=None, force=False, release_asset_name=None):
         try:
             repo_root = source_path
             plugin_info = self.detector.detect_plugin_structure(source_path, target_name)
@@ -577,6 +615,9 @@ class PackageManager:
                 'installed_date': datetime.now().isoformat(),
                 'path': str(target_dll.relative_to(self.ashita_root))
             }
+
+            if release_asset_name:
+                package_info['release_asset_name'] = release_asset_name
             
             if commit_hash:
                 # For monorepos, get folder-specific commit
@@ -671,86 +712,102 @@ class PackageManager:
         source_path = Path(source_path)
         errors = []
         
-        has_addons_folder = (source_path / 'addons').exists()
-        has_plugins_folder = (source_path / 'plugins').exists()
+        subdirs = [d for d in source_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
+        if len(subdirs) == 1:
+            actual_source = subdirs[0]
+        else:
+            actual_source = source_path
+        
+        has_addons_folder = (actual_source / 'addons').exists()
+        has_plugins_folder = (actual_source / 'plugins').exists()
         is_multi_folder_repo = has_addons_folder or has_plugins_folder
         
-        if not is_multi_folder_repo:
-            return errors
+        if is_multi_folder_repo:
+            try:
+                libs_source = actual_source / 'addons' / 'libs'
+                if libs_source.exists() and libs_source.is_dir():
+                    libs_target = self.addons_dir / 'libs'
+                    libs_target.mkdir(exist_ok=True, parents=True)
+                    
+                    lib_files = []
+                    
+                    for item in libs_source.rglob('*'):
+                        if item.is_file():
+                            rel_path = item.relative_to(libs_source)
+                            target_file = libs_target / rel_path
+                            
+                            target_file.parent.mkdir(parents=True, exist_ok=True)
+                            
+                            shutil.copy2(item, target_file)
+                            
+                            try:
+                                tracked_path = target_file.relative_to(self.ashita_root)
+                            except ValueError:
+                                tracked_path = rel_path
+                            lib_files.append(str(tracked_path))
+                    
+                    if lib_files:
+                        pkg = self.package_tracker.get_package(package_name, 'addon')
+                        if pkg:
+                            pkg['lib_files'] = lib_files
+            except Exception as e:
+                errors.append(f"Error copying libs: {e}")
         
         try:
-            # Handle libs folder
-            libs_source = source_path / 'addons' / 'libs'
-            if libs_source.exists() and libs_source.is_dir():
-                libs_target = self.addons_dir / 'libs'
-                libs_target.mkdir(exist_ok=True, parents=True)
-                
-                # Track which lib files belong to this package
-                lib_files = []
-                
-                # Copy/merge libs files
-                for item in libs_source.rglob('*'):
-                    if item.is_file():
-                        rel_path = item.relative_to(libs_source)
-                        target_file = libs_target / rel_path
-                        
-                        # Create parent directories if needed
-                        target_file.parent.mkdir(parents=True, exist_ok=True)
-                        
-                        # Copy the file
-                        shutil.copy2(item, target_file)
-                        
-                        # Track this file for this package
-                        lib_files.append(str(rel_path))
-                
-                # Store lib files in package metadata
-                if lib_files:
-                    pkg = self.package_tracker.get_package(package_name, 'addon')
-                    if pkg:
-                        pkg['lib_files'] = lib_files
-        except Exception as e:
-            errors.append(f"Error copying libs: {e}")
-        
-        try:
-            # Track docs files
-            package_docs_locations = [
-                source_path / 'docs',
-                source_path / 'Docs',
-            ]
-            
             doc_files = []
+            found_docs = False
+            
+            if is_multi_folder_repo:
+                package_docs_locations = [
+                    actual_source / 'docs',
+                    actual_source / 'Docs',
+                ]
+            else:
+                package_docs_locations = [
+                    actual_source / 'docs',
+                    actual_source / 'Docs',
+                ]
+            
             for docs_location in package_docs_locations:
-                if docs_location.exists() and docs_location.is_dir():
-                    target_docs = self.docs_dir / package_name
+                if not docs_location.exists() or not docs_location.is_dir():
+                    continue
                     
-                    # Check if docs folder already contains a subfolder with the package name
-                    package_subfolder = docs_location / package_name
-                    package_subfolder_lower = docs_location / package_name.lower()
-                    package_subfolder_upper = docs_location / package_name.upper()
-                    package_subfolder_title = docs_location / package_name.title()
-                    
-                    source_to_copy = None
-                    if package_subfolder.exists() and package_subfolder.is_dir():
-                        source_to_copy = package_subfolder
-                    elif package_subfolder_lower.exists() and package_subfolder_lower.is_dir():
-                        source_to_copy = package_subfolder_lower
-                    elif package_subfolder_upper.exists() and package_subfolder_upper.is_dir():
-                        source_to_copy = package_subfolder_upper
-                    elif package_subfolder_title.exists() and package_subfolder_title.is_dir():
-                        source_to_copy = package_subfolder_title
-                    else:
-                        # No package subfolder found, copy entire docs folder
+                target_docs = self.docs_dir / package_name
+                source_to_copy = None
+                
+                package_variations = [
+                    docs_location / package_name,
+                    docs_location / package_name.lower(),
+                    docs_location / package_name.upper(),
+                    docs_location / package_name.title()
+                ]
+                
+                for variation in package_variations:
+                    if variation.exists() and variation.is_dir():
+                        source_to_copy = variation
+                        break
+                
+                if not source_to_copy:
+                    if is_multi_folder_repo:
                         source_to_copy = docs_location
-                    
+                    else:
+                        source_to_copy = docs_location
+                
+                if source_to_copy and source_to_copy.exists():
                     if target_docs.exists():
                         self._remove_directory_safe(target_docs)
                     shutil.copytree(source_to_copy, target_docs)
                     
-                    # Track all copied docs files
                     for item in source_to_copy.rglob('*'):
                         if item.is_file():
                             rel_path = item.relative_to(source_to_copy)
-                            doc_files.append(str(rel_path))
+                            target_file = target_docs / rel_path
+                            try:
+                                tracked_path = target_file.relative_to(self.ashita_root)
+                            except ValueError:
+                                tracked_path = rel_path
+                            doc_files.append(str(tracked_path))
+                    found_docs = True
                     break
             
             if doc_files:
@@ -761,27 +818,85 @@ class PackageManager:
             errors.append(f"Error copying docs: {e}")
         
         try:
-            # Track resource files
-            package_resources_locations = [
-                source_path / 'resources',
-                source_path / 'Resources',
-            ]
-            
             resource_files = []
+            found_resources = False
+            
+            if is_multi_folder_repo:
+                package_resources_locations = [
+                    actual_source / 'resources',
+                    actual_source / 'Resources',
+                ]
+            else:
+                package_resources_locations = [
+                    actual_source / 'resources',
+                    actual_source / 'Resources',
+                ]
+            
             for res_location in package_resources_locations:
-                if res_location.exists() and res_location.is_dir():
-                    resources_dir = self.ashita_root / 'resources'
-                    resources_dir.mkdir(exist_ok=True, parents=True)
-                    target_resources = resources_dir / package_name
-                    if target_resources.exists():
-                        self._remove_directory_safe(target_resources)
-                    shutil.copytree(res_location, target_resources)
-                    
-                    # Track all copied resource files
-                    for item in res_location.rglob('*'):
-                        if item.is_file():
-                            rel_path = item.relative_to(res_location)
-                            resource_files.append(str(rel_path))
+                if not res_location.exists() or not res_location.is_dir():
+                    continue
+                
+                resources_dir = self.ashita_root / 'resources'
+                resources_dir.mkdir(exist_ok=True, parents=True)
+                
+                package_variations = [
+                    res_location / package_name,
+                    res_location / package_name.lower(),
+                    res_location / package_name.upper(),
+                    res_location / package_name.title()
+                ]
+                
+                has_package_subfolder = any(v.exists() and v.is_dir() for v in package_variations)
+                
+                if has_package_subfolder:
+                    for variation in package_variations:
+                        if variation.exists() and variation.is_dir():
+                            target_resources = resources_dir / package_name
+                            if target_resources.exists():
+                                self._remove_directory_safe(target_resources)
+                            shutil.copytree(variation, target_resources)
+                            
+                            for item in variation.rglob('*'):
+                                if item.is_file():
+                                    rel_path = item.relative_to(variation)
+                                    target_file = target_resources / rel_path
+                                    try:
+                                        tracked_path = target_file.relative_to(self.ashita_root)
+                                    except ValueError:
+                                        tracked_path = rel_path
+                                    resource_files.append(str(tracked_path))
+                            found_resources = True
+                            break
+                else:
+                    for subdir in res_location.iterdir():
+                        if subdir.is_dir():
+                            target_subdir = resources_dir / subdir.name
+                            if target_subdir.exists():
+                                for item in subdir.rglob('*'):
+                                    if item.is_file():
+                                        rel_path = item.relative_to(res_location)
+                                        target_file = resources_dir / rel_path
+                                        target_file.parent.mkdir(parents=True, exist_ok=True)
+                                        shutil.copy2(item, target_file)
+                                        try:
+                                            tracked_path = target_file.relative_to(self.ashita_root)
+                                        except ValueError:
+                                            tracked_path = rel_path
+                                        resource_files.append(str(tracked_path))
+                            else:
+                                shutil.copytree(subdir, target_subdir)
+                                for item in subdir.rglob('*'):
+                                    if item.is_file():
+                                        rel_path = item.relative_to(res_location)
+                                        target_file = resources_dir / rel_path
+                                        try:
+                                            tracked_path = target_file.relative_to(self.ashita_root)
+                                        except ValueError:
+                                            tracked_path = rel_path
+                                        resource_files.append(str(tracked_path))
+                    found_resources = True
+                
+                if found_resources:
                     break
             
             if resource_files:
@@ -793,7 +908,7 @@ class PackageManager:
         
         return errors
     
-    def _get_latest_release_url(self, repo_url):
+    def _get_latest_release_url(self, repo_url, preferred_asset_name=None):
         try:
             parsed = urlparse(repo_url)
             path_parts = parsed.path.strip('/').split('/')
@@ -825,10 +940,42 @@ class PackageManager:
             data = response.json()
             
             if 'assets' in data and len(data['assets']) > 0:
-                return data['assets'][0]['browser_download_url']
+                assets = data['assets']
+                zip_assets = [a for a in assets if a['name'].lower().endswith('.zip')]
+
+                if preferred_asset_name and zip_assets:
+                    normalized = preferred_asset_name.lower()
+                    for asset in zip_assets:
+                        if asset['name'].lower() == normalized:
+                            return (asset['browser_download_url'], asset['name'])
+
+                    tokens = self._tokenize_asset_name(preferred_asset_name)
+                    if tokens:
+                        best_asset = None
+                        best_score = 0
+                        for asset in zip_assets:
+                            score = self._score_asset_match(asset['name'], tokens)
+                            if score > best_score:
+                                best_asset = asset
+                                best_score = score
+                        if best_asset and best_score > 0:
+                            return (best_asset['browser_download_url'], best_asset['name'])
+
+                    for asset in zip_assets:
+                        if normalized in asset['name'].lower():
+                            return (asset['browser_download_url'], asset['name'])
+
+                if len(zip_assets) > 1:
+                    return {'multiple_assets': True, 'assets': [{'name': a['name'], 'url': a['browser_download_url']} for a in zip_assets]}
+                elif len(zip_assets) == 1:
+                    asset = zip_assets[0]
+                    return (asset['browser_download_url'], asset['name'])
+                else:
+                    asset = assets[0]
+                    return (asset['browser_download_url'], asset['name'])
             
             if 'zipball_url' in data:
-                return data['zipball_url']
+                return (data['zipball_url'], None)
             
             return None
             
@@ -864,8 +1011,33 @@ class PackageManager:
             
         except Exception:
             return 'unknown'
+
+    def _infer_asset_name(self, download_url):
+        try:
+            parsed = urlparse(download_url)
+            if not parsed.path:
+                return None
+            return Path(parsed.path).name
+        except Exception:
+            return None
+
+    def _tokenize_asset_name(self, name):
+        if not name:
+            return []
+        tokens = re.split(r'[^a-z0-9]+', name.lower())
+        return [t for t in tokens if t and len(t) > 2 and not t.isdigit()]
+
+    def _score_asset_match(self, candidate_name, tokens):
+        if not candidate_name or not tokens:
+            return 0
+        candidate_lower = candidate_name.lower()
+        score = 0
+        for token in tokens:
+            if token and token in candidate_lower:
+                score += 1
+        return score
     
-    def update_package(self, package_name, pkg_type):
+    def update_package(self, package_name, pkg_type, release_asset_url=None, release_asset_name=None):
         """Update an existing package"""
         try:
             package_info = self.package_tracker.get_package(package_name, pkg_type)
@@ -911,6 +1083,17 @@ class PackageManager:
                             'message': f'Package "{package_name}" is already up-to-date',
                             'already_updated': True
                         }
+
+            if install_method == 'release' and not release_asset_url:
+                current_release_tag = package_info.get('release_tag')
+                if current_release_tag:
+                    latest_release_tag = self._get_release_tag(source_url)
+                    if latest_release_tag and latest_release_tag != 'unknown' and latest_release_tag == current_release_tag:
+                        return {
+                            'success': True,
+                            'message': f'Package "{package_name}" is already up-to-date (release {current_release_tag})',
+                            'already_updated': True
+                        }
             
             old_package_info = package_info.copy()
             
@@ -937,7 +1120,20 @@ class PackageManager:
                     branch = self.official_repo_branch if source_url == self.official_repo else None
                     result = self.install_from_git(source_url, pkg_type, target_package_name=package_name, branch=branch)
                 else:
-                    result = self.install_from_release(source_url, pkg_type)
+                    preferred_asset_name = release_asset_name or package_info.get('release_asset_name')
+                    result = self.install_from_release(
+                        source_url,
+                        pkg_type,
+                        asset_download_url=release_asset_url,
+                        asset_name=preferred_asset_name
+                    )
+                    if result.get('requires_variant_selection'):
+                        result = result.copy()
+                        result.setdefault('error', 'Variant selection required')
+                        result['package_name'] = package_name
+                        result['pkg_type'] = pkg_type
+                        result['is_update'] = True
+                        return result
                 
                 if result['success']:
                     # Success, remove backup
@@ -975,7 +1171,8 @@ class PackageManager:
                     
                     # Restore tracker entry
                     self.package_tracker.add_package(package_name, pkg_type, old_package_info)
-                    return {'success': False, 'error': f'Update failed: {result["error"]}'}
+                    error_msg = result.get('error', 'Unknown error during update')
+                    return {'success': False, 'error': f'Update failed: {error_msg}'}
             
             except Exception as e:
                 # Exception during update, restore backup
@@ -1097,22 +1294,22 @@ class PackageManager:
                             other_addon_lib_files.update(other_info['lib_files'])
                     
                     for lib_file in package_info['lib_files']:
-                        # Only remove if no other addon uses this file
                         if lib_file not in other_addon_lib_files:
-                            lib_path = libs_dir / lib_file
+                            lib_path = self.ashita_root / lib_file
+                            if not lib_path.exists():
+                                lib_path = libs_dir / lib_file
                             if lib_path.exists():
                                 try:
                                     lib_path.unlink()
-                                    # Remove empty parent directories
                                     parent = lib_path.parent
                                     while parent != libs_dir and parent.exists():
                                         try:
-                                            parent.rmdir()  # Only removes if empty
+                                            parent.rmdir()
                                             parent = parent.parent
                                         except OSError:
                                             break
                                 except Exception:
-                                    pass  # Continue even if file removal fails
+                                    pass
             else:
                 target_dll = self.plugins_dir / f"{package_name}.dll"
                 if target_dll.exists():
@@ -1122,7 +1319,6 @@ class PackageManager:
             if 'doc_files' in package_info:
                 docs_base = self.docs_dir / package_name
                 
-                # Get all other packages and their docs files
                 all_packages = self.package_tracker.get_all_packages()
                 other_doc_files = set()
                 for pkg_type_name in ['addons', 'plugins']:
@@ -1131,27 +1327,26 @@ class PackageManager:
                             other_doc_files.update(other_info['doc_files'])
                 
                 for doc_file in package_info['doc_files']:
-                    # Only remove if no other package uses this file
                     if doc_file not in other_doc_files:
-                        doc_path = docs_base / doc_file
+                        doc_path = self.ashita_root / doc_file
+                        if not doc_path.exists():
+                            doc_path = docs_base / doc_file
                         if doc_path.exists():
                             try:
                                 doc_path.unlink()
                             except Exception:
                                 pass
                 
-                # Remove empty docs directory
                 if docs_base.exists():
                     try:
-                        docs_base.rmdir()
+                        self._remove_directory_safe(docs_base)
                     except OSError:
-                        pass  # Directory not empty, keep it
+                        pass
             
             # Remove tracked resource files (only if no other package uses them)
             if 'resource_files' in package_info:
-                resources_base = self.ashita_root / 'resources' / package_name
+                resources_base = self.ashita_root / 'resources'
                 
-                # Get all other packages and their resource files
                 all_packages = self.package_tracker.get_all_packages()
                 other_resource_files = set()
                 for pkg_type_name in ['addons', 'plugins']:
@@ -1160,21 +1355,22 @@ class PackageManager:
                             other_resource_files.update(other_info['resource_files'])
                 
                 for resource_file in package_info['resource_files']:
-                    # Only remove if no other package uses this file
                     if resource_file not in other_resource_files:
-                        resource_path = resources_base / resource_file
+                        resource_path = self.ashita_root / resource_file
+                        if not resource_path.exists():
+                            resource_path = resources_base / resource_file
                         if resource_path.exists():
                             try:
                                 resource_path.unlink()
+                                parent = resource_path.parent
+                                while parent != resources_base and parent.exists():
+                                    try:
+                                        parent.rmdir()
+                                        parent = parent.parent
+                                    except OSError:
+                                        break
                             except Exception:
                                 pass
-                
-                # Remove empty resources directory
-                if resources_base.exists():
-                    try:
-                        resources_base.rmdir()
-                    except OSError:
-                        pass  # Directory not empty, keep it
             
             # Remove from tracker
             self.package_tracker.remove_package(package_name, pkg_type)
@@ -1273,6 +1469,57 @@ class PackageManager:
                 return None
                 
         except subprocess.TimeoutExpired:
+            return None
+        except Exception:
+            return None
+
+    def detect_package_type_from_release(self, url):
+        """Attempt to determine package type by inspecting the latest release asset."""
+        try:
+            release_info = self._get_latest_release_url(url)
+
+            download_url = None
+            if isinstance(release_info, dict):
+                if release_info.get('error') == 'rate_limit':
+                    return None
+                assets = release_info.get('assets', [])
+                if not assets:
+                    return None
+                # Prefer .zip assets when multiple exist
+                zip_asset = next((a for a in assets if a['name'].lower().endswith('.zip')), None)
+                candidate = zip_asset or assets[0]
+                download_url = candidate.get('url') or candidate.get('download_url') or candidate.get('browser_download_url')
+            elif isinstance(release_info, tuple):
+                download_url = release_info[0]
+            else:
+                download_url = release_info
+
+            if not download_url:
+                return None
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                zip_path = temp_path / 'release.zip'
+
+                response = requests.get(download_url, stream=True, timeout=30)
+                response.raise_for_status()
+
+                with open(zip_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+                extract_path = temp_path / 'extracted'
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(extract_path)
+
+                plugin_info = self.detector.detect_plugin_structure(extract_path)
+                if plugin_info.get('found'):
+                    return 'plugin'
+
+                addon_info = self.detector.detect_addon_structure(extract_path)
+                if addon_info.get('found'):
+                    return 'addon'
+
             return None
         except Exception:
             return None

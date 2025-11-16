@@ -14,9 +14,6 @@
   <img src="https://github.com/user-attachments/assets/fcc0de2b-3230-40d8-bce5-bc878a43f64e" alt="Image 2" width="300px" style="max-width: 100%;"/>
 </p>
 
-
-
-
 ## This utility is still in testing and developement, please use carefully. Strongly recommended to backup your Ashita installation before starting to use it. Use at your own risk.
 
 ## At this moment, the package manager assumes all addons/plugins in your folders comes pre-installed with Ashita. Recommended to use on a fresh install, then reinstall your addons/plugins using the package manager.

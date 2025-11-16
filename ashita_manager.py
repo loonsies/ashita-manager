@@ -37,7 +37,7 @@ class InstallWorker(QThread):
     variant_selection_requested = pyqtSignal(dict)
     progress = pyqtSignal(str)
     
-    def __init__(self, package_manager, url, pkg_type, install_method, branch=None, force=False, plugin_variant=None):
+    def __init__(self, package_manager, url, pkg_type, install_method, branch=None, force=False, plugin_variant=None, release_asset_url=None, release_asset_name=None):
         super().__init__()
         self.package_manager = package_manager
         self.url = url
@@ -46,6 +46,8 @@ class InstallWorker(QThread):
         self.branch = branch
         self.force = force
         self.plugin_variant = plugin_variant
+        self.release_asset_url = release_asset_url
+        self.release_asset_name = release_asset_name
     
     def run(self):
         try:
@@ -54,7 +56,14 @@ class InstallWorker(QThread):
                 result = self.package_manager.install_from_git(self.url, self.pkg_type, branch=self.branch, force=self.force, plugin_variant=self.plugin_variant)
             else:  # Release
                 self.progress.emit(f"Downloading release from {self.url}...")
-                result = self.package_manager.install_from_release(self.url, self.pkg_type, force=self.force, plugin_variant=self.plugin_variant)
+                result = self.package_manager.install_from_release(
+                    self.url,
+                    self.pkg_type,
+                    force=self.force,
+                    plugin_variant=self.plugin_variant,
+                    asset_download_url=self.release_asset_url,
+                    asset_name=self.release_asset_name
+                )
             
             if result['success']:
                 self.finished.emit(True, result['message'])
@@ -73,17 +82,28 @@ class UpdateWorker(QThread):
     """Worker thread for package update"""
     finished = pyqtSignal(bool, str, bool)
     progress = pyqtSignal(str)
+    variant_selection_requested = pyqtSignal(dict)
     
-    def __init__(self, package_manager, package_name, pkg_type):
+    def __init__(self, package_manager, package_name, pkg_type, release_asset_url=None, release_asset_name=None):
         super().__init__()
         self.package_manager = package_manager
         self.package_name = package_name
         self.pkg_type = pkg_type
+        self.release_asset_url = release_asset_url
+        self.release_asset_name = release_asset_name
     
     def run(self):
         try:
             self.progress.emit(f"Updating {self.package_name}...")
-            result = self.package_manager.update_package(self.package_name, self.pkg_type)
+            result = self.package_manager.update_package(
+                self.package_name,
+                self.pkg_type,
+                release_asset_url=self.release_asset_url,
+                release_asset_name=self.release_asset_name
+            )
+            if result.get('requires_variant_selection'):
+                self.variant_selection_requested.emit(result)
+                return
             
             if result['success']:
                 already_updated = result.get('already_updated', False)
@@ -357,6 +377,7 @@ class AshitaManagerUI(QMainWindow):
         self.package_manager = PackageManager(self.ashita_root, self.package_tracker)
         self._centered = False
         self._first_launch = self.package_tracker.is_first_launch()
+        self._last_update_params = None
 
         # Script manager
         self.current_script = None
@@ -1083,13 +1104,18 @@ class AshitaManagerUI(QMainWindow):
             return
         
         pkg_type_text = self.type_selector.currentText()
+        install_method = self.method_selector.currentText()
         
         if pkg_type_text == "Auto":
             self.log(f"Auto-detecting package type for {url}...")
             progress = self._create_progress("Auto-detecting package type...", None, 0, 0)
             QApplication.processEvents()
-            
-            detected_type = self.package_manager.detect_package_type(url)
+
+            detected_type = None
+            if install_method == 'Release':
+                detected_type = self.package_manager.detect_package_type_from_release(url)
+            if not detected_type:
+                detected_type = self.package_manager.detect_package_type(url)
             
             progress.close()
             
@@ -1104,8 +1130,6 @@ class AshitaManagerUI(QMainWindow):
         else:
             pkg_type = pkg_type_text.lower()
         
-        install_method = self.method_selector.currentText()
-        
         self.log(f"Installing {pkg_type} from {url} using {install_method}...")
         
         self.progress = self._create_progress("Installing package...", "Cancel", 0, 0)
@@ -1115,9 +1139,10 @@ class AshitaManagerUI(QMainWindow):
             'url': url,
             'pkg_type': pkg_type,
             'install_method': install_method,
-            'branch': None
+            'branch': None,
+            'release_asset_url': None,
+            'release_asset_name': None
         }
-
         # If cloning, attempt to list remote branches and prompt the user if there are multiple
         branch = None
         if install_method == 'Clone':
@@ -1143,7 +1168,16 @@ class AshitaManagerUI(QMainWindow):
             # Update stored branch parameter
             self._last_install_params['branch'] = branch
 
-        self.worker = InstallWorker(self.package_manager, url, pkg_type, install_method, branch=branch, plugin_variant=None)
+        self.worker = InstallWorker(
+            self.package_manager,
+            url,
+            pkg_type,
+            install_method,
+            branch=branch,
+            plugin_variant=None,
+            release_asset_url=self._last_install_params.get('release_asset_url'),
+            release_asset_name=self._last_install_params.get('release_asset_name')
+        )
         self.worker.progress.connect(self.update_progress)
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.install_finished)
@@ -1272,12 +1306,23 @@ class AshitaManagerUI(QMainWindow):
         pkg_type = params['pkg_type']
         install_method = params['install_method']
         branch = params.get('branch')
+        release_asset_url = params.get('release_asset_url')
         
         self.progress = QProgressDialog("Installing package...", None, 0, 0, self)
         self.progress.setWindowModality(Qt.WindowModality.WindowModal)
         self.progress.show()
         
-        self.worker = InstallWorker(self.package_manager, url, pkg_type, install_method, branch=branch, force=True, plugin_variant=None)
+        self.worker = InstallWorker(
+            self.package_manager,
+            url,
+            pkg_type,
+            install_method,
+            branch=branch,
+            force=True,
+            plugin_variant=None,
+            release_asset_url=release_asset_url,
+            release_asset_name=self._last_install_params.get('release_asset_name')
+        )
         self.worker.progress.connect(self.update_progress)
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.install_finished)
@@ -1287,7 +1332,6 @@ class AshitaManagerUI(QMainWindow):
 
     def handle_variant_selection(self, result):
         """Prompt the user to select a plugin variant when backend requests it."""
-        # Close current progress dialog so the selection UI is visible and not blocked
         try:
             self.progress.close()
         except Exception:
@@ -1296,6 +1340,9 @@ class AshitaManagerUI(QMainWindow):
         variants = result.get('variants', [])
         if not variants:
             return
+        
+        is_release_asset = result.get('is_release_asset', False)
+        self._pending_variant_choices = variants
 
         choices = [v.get('name') for v in variants]
         choice, ok = QInputDialog.getItem(self, "Select plugin variant", "Select variant to install:", choices, 0, False)
@@ -1303,10 +1350,17 @@ class AshitaManagerUI(QMainWindow):
             self.log("Variant selection cancelled by user")
             return
 
-        # Retry installation with the chosen variant
-        self._retry_install_with_variant(choice)
+        selected_info = next((v for v in variants if v.get('name') == choice), None)
+        asset_url = None
+        if selected_info:
+            asset_url = selected_info.get('url') or selected_info.get('download_url')
 
-    def _retry_install_with_variant(self, variant_name):
+        if is_release_asset:
+            self._last_install_params['release_asset_name'] = choice
+
+        self._retry_install_with_variant(choice, is_release_asset=is_release_asset, asset_url=asset_url)
+
+    def _retry_install_with_variant(self, variant_name, is_release_asset=False, asset_url=None):
         if not hasattr(self, '_last_install_params'):
             self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Installation parameters not found")
             return
@@ -1316,12 +1370,33 @@ class AshitaManagerUI(QMainWindow):
         pkg_type = params['pkg_type']
         install_method = params['install_method']
         branch = params.get('branch')
+        release_asset_url = params.get('release_asset_url')
+        
+        plugin_variant = variant_name
+        
+        if is_release_asset:
+            plugin_variant = None
+            if asset_url:
+                release_asset_url = asset_url
+            params['release_asset_name'] = variant_name
+        
+        params['release_asset_url'] = release_asset_url
 
         self.progress = QProgressDialog("Installing package...", None, 0, 0, self)
         self.progress.setWindowModality(Qt.WindowModality.WindowModal)
         self.progress.show()
 
-        self.worker = InstallWorker(self.package_manager, url, pkg_type, install_method, branch=branch, force=False, plugin_variant=variant_name)
+        self.worker = InstallWorker(
+            self.package_manager,
+            url,
+            pkg_type,
+            install_method,
+            branch=branch,
+            force=False,
+            plugin_variant=plugin_variant,
+            release_asset_url=release_asset_url,
+            release_asset_name=self._last_install_params.get('release_asset_name')
+        )
         self.worker.progress.connect(self.update_progress)
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.install_finished)
@@ -1523,10 +1598,17 @@ class AshitaManagerUI(QMainWindow):
             package_name = package_names[0]
             self.log(f"Starting update for {package_name}...")
             self.progress = self._create_progress(f"Updating {package_name}...", None, 0, 0)
+            self._last_update_params = {
+                'package_name': package_name,
+                'pkg_type': pkg_type,
+                'release_asset_url': None,
+                'release_asset_name': None
+            }
             self.update_worker = UpdateWorker(self.package_manager, package_name, pkg_type)
             self.update_worker.progress.connect(self.update_progress)
             self.update_worker.progress.connect(self.log)
             self.update_worker.finished.connect(self.update_finished)
+            self.update_worker.variant_selection_requested.connect(self.handle_update_variant_selection)
             self.update_worker.start()
         else:
             # Multiple packages - use batch update
@@ -1540,7 +1622,11 @@ class AshitaManagerUI(QMainWindow):
             self.batch_worker.start()
     
     def update_finished(self, success, message, already_updated=False):
-        self.progress.close()
+        try:
+            self.progress.close()
+        except Exception:
+            pass
+        self._last_update_params = None
         
         if success:
             self.log(message)
@@ -1552,6 +1638,84 @@ class AshitaManagerUI(QMainWindow):
         else:
             self.log(f"Update failed: {message}")
             self._show_centered_message(QMessageBox.Icon.Warning, "Update failed", message)
+
+    def handle_update_variant_selection(self, result):
+        try:
+            self.progress.close()
+        except Exception:
+            pass
+
+        variants = result.get('variants', [])
+        if not variants:
+            self.update_finished(False, "No release variants are available to select for this package.", False)
+            return
+
+        choices = [v.get('name') for v in variants if v.get('name')]
+        if not choices:
+            self.update_finished(False, "Unable to determine variant names for this release.", False)
+            return
+
+        choice, ok = QInputDialog.getItem(self, "Select release asset", "Choose the release asset to update with:", choices, 0, False)
+        if not ok:
+            self.update_finished(False, "Variant selection cancelled by user.", False)
+            return
+
+        selected_info = next((v for v in variants if v.get('name') == choice), None)
+        if not selected_info:
+            self.update_finished(False, "Selected variant information was not found.", False)
+            return
+
+        asset_url = selected_info.get('url') or selected_info.get('download_url') or selected_info.get('browser_download_url')
+        if not asset_url:
+            self.update_finished(False, "Selected variant is missing a download URL.", False)
+            return
+
+        if not self._last_update_params:
+            self._last_update_params = {
+                'package_name': result.get('package_name'),
+                'pkg_type': result.get('pkg_type'),
+                'release_asset_url': None,
+                'release_asset_name': None
+            }
+        else:
+            if result.get('package_name'):
+                self._last_update_params['package_name'] = result['package_name']
+            if result.get('pkg_type'):
+                self._last_update_params['pkg_type'] = result['pkg_type']
+
+        self._last_update_params['release_asset_url'] = asset_url
+        self._last_update_params['release_asset_name'] = selected_info.get('name')
+
+        self._retry_update_with_variant()
+
+    def _retry_update_with_variant(self):
+        if not self._last_update_params:
+            self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Update parameters not found.")
+            return
+
+        package_name = self._last_update_params.get('package_name')
+        pkg_type = self._last_update_params.get('pkg_type')
+        release_asset_url = self._last_update_params.get('release_asset_url')
+        release_asset_name = self._last_update_params.get('release_asset_name')
+
+        if not package_name or not pkg_type:
+            self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Missing package information for update retry.")
+            return
+
+        self.log(f"Retrying update for {package_name} with asset {release_asset_name or 'selected variant'}...")
+        self.progress = self._create_progress(f"Updating {package_name}...", None, 0, 0)
+        self.update_worker = UpdateWorker(
+            self.package_manager,
+            package_name,
+            pkg_type,
+            release_asset_url=release_asset_url,
+            release_asset_name=release_asset_name
+        )
+        self.update_worker.progress.connect(self.update_progress)
+        self.update_worker.progress.connect(self.log)
+        self.update_worker.finished.connect(self.update_finished)
+        self.update_worker.variant_selection_requested.connect(self.handle_update_variant_selection)
+        self.update_worker.start()
 
     def batch_update(self, pkg_type):
         packages = self.package_tracker.get_all_packages()
