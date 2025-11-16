@@ -1087,6 +1087,17 @@ class AshitaManagerUI(QMainWindow):
     
     def scan_finished(self, results):
         self.scan_progress.close()
+
+        official_lookup = results.get('official_lookup')
+        if official_lookup:
+            if official_lookup.get('success', False):
+                self.log("Official catalog lookup succeeded")
+            else:
+                error_msg = official_lookup.get('error') or 'Unknown error'
+                self.log(f"Official catalog lookup failed: {error_msg}")
+
+        for flag in results.get('release_flags', []):
+            self.log(flag)
         
         if 'error' in results:
             self.log(f"Scan failed: {results['error']}")

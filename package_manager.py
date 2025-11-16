@@ -48,6 +48,54 @@ class PackageManager:
             func(path)
         except Exception:
             pass
+
+    def _detect_git_metadata(self, repo_path):
+        """Return basic git metadata (remote, branch, commit) for a local repo if .git exists."""
+        repo_path = Path(repo_path)
+        if not (repo_path / '.git').exists():
+            return None
+
+        metadata = {}
+        try:
+            remote_result = self._run_command(
+                ['git', 'remote', 'get-url', 'origin'],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if remote_result.returncode == 0:
+                metadata['source'] = remote_result.stdout.strip()
+        except Exception:
+            pass
+
+        try:
+            branch_result = self._run_command(
+                ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if branch_result.returncode == 0:
+                metadata['branch'] = branch_result.stdout.strip()
+        except Exception:
+            pass
+
+        try:
+            commit_result = self._run_command(
+                ['git', 'rev-parse', 'HEAD'],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if commit_result.returncode == 0:
+                metadata['commit'] = commit_result.stdout.strip()
+        except Exception:
+            pass
+
+        return metadata if metadata else None
     
     def _remove_directory_safe(self, path):
         """Safely remove a directory handling Windows file locks"""
@@ -1036,6 +1084,55 @@ class PackageManager:
             if token and token in candidate_lower:
                 score += 1
         return score
+
+    def _fetch_official_repo_catalog(self, branch=None):
+        """Fetch lists of official addons and plugins from the Ashita repo."""
+        result = {
+            'addons': set(),
+            'plugins': set(),
+            'success': False,
+            'error': None
+        }
+        try:
+            base_url = "https://api.github.com/repos/AshitaXI/Ashita-v4beta/contents"
+            headers = {}
+            token = self.package_tracker.get_setting('github_token')
+            if not token:
+                token = os.environ.get('GITHUB_TOKEN')
+            if token:
+                headers['Authorization'] = f'token {token}'
+
+            ref = f"?ref={branch}" if branch else ''
+            addons_resp = requests.get(f"{base_url}/addons{ref}", headers=headers or None, timeout=10)
+            plugins_resp = requests.get(f"{base_url}/plugins{ref}", headers=headers or None, timeout=10)
+
+            if addons_resp.status_code == 200:
+                for entry in addons_resp.json():
+                    if entry.get('type') == 'dir':
+                        name = entry.get('name')
+                        if name and not name.startswith('.') and name.lower() != 'libs':
+                            result['addons'].add(name)
+
+            if plugins_resp.status_code == 200:
+                for entry in plugins_resp.json():
+                    if entry.get('type') == 'file':
+                        name = entry.get('name')
+                        if name and name.lower().endswith('.dll'):
+                            result['plugins'].add(Path(name).stem)
+
+            if addons_resp.status_code == 200 and plugins_resp.status_code == 200:
+                result['success'] = True
+            else:
+                error_parts = []
+                if addons_resp.status_code != 200:
+                    error_parts.append(f"addons:{addons_resp.status_code}")
+                if plugins_resp.status_code != 200:
+                    error_parts.append(f"plugins:{plugins_resp.status_code}")
+                result['error'] = ' / '.join(error_parts) or 'Unknown error'
+        except Exception as e:
+            result['error'] = str(e)
+
+        return result
     
     def update_package(self, package_name, pkg_type, release_asset_url=None, release_asset_name=None):
         """Update an existing package"""
@@ -1384,56 +1481,126 @@ class PackageManager:
         """Scan for existing addons and plugins on first launch"""
         addon_count = 0
         plugin_count = 0
-        
+
+        catalog = self._fetch_official_repo_catalog(branch=self.official_repo_branch)
+        official_addons = catalog.get('addons', set())
+        official_plugins = catalog.get('plugins', set())
+        catalog_success = catalog.get('success', False)
+        official_addons_lower = {name.lower() for name in official_addons}
+        official_plugins_lower = {name.lower() for name in official_plugins}
+
+        catalog_summary = {
+            'success': catalog_success,
+            'error': catalog.get('error')
+        }
+        release_reasons = []
+
         # Scan addons
         if self.addons_dir.exists():
             for addon_dir in self.addons_dir.iterdir():
-                if addon_dir.is_dir():
-                    # Check if main lua file exists
-                    main_lua = addon_dir / f"{addon_dir.name}.lua"
-                    if main_lua.exists():
-                        # Get commit hash for this addon folder
+                if not addon_dir.is_dir():
+                    continue
+                main_lua = addon_dir / f"{addon_dir.name}.lua"
+                if not main_lua.exists():
+                    continue
+
+                package_info = {
+                    'installed_date': datetime.now().isoformat(),
+                    'path': str(addon_dir.relative_to(self.ashita_root))
+                }
+
+                git_info = self._detect_git_metadata(addon_dir)
+                if git_info:
+                    package_info['install_method'] = 'git'
+                    package_info['source'] = git_info.get('source') or 'unknown'
+                    if git_info.get('branch'):
+                        package_info['branch'] = git_info['branch']
+                    if git_info.get('commit'):
+                        package_info['commit'] = git_info['commit']
+                    package_info['scan_reason'] = 'git metadata detected'
+                elif catalog_success:
+                    if addon_dir.name.lower() in official_addons_lower:
+                        package_info['install_method'] = 'pre-installed'
+                        package_info['source'] = self.official_repo
+                        package_info['branch'] = self.official_repo_branch
                         commit_hash = self._get_folder_commit_hash(addon_dir)
-                        
-                        # Add to tracker as pre-installed with official repo
-                        package_info = {
-                            'source': self.official_repo,
-                            'install_method': 'pre-installed',
-                            'installed_date': datetime.now().isoformat(),
-                            'path': str(addon_dir.relative_to(self.ashita_root)),
-                            'branch': self.official_repo_branch
-                        }
-                        
                         if commit_hash:
                             package_info['commit'] = commit_hash
-                        
-                        self.package_tracker.add_package(addon_dir.name, 'addon', package_info)
-                        addon_count += 1
-        
+                        package_info['scan_reason'] = 'listed in official catalog'
+                    else:
+                        package_info['install_method'] = 'release'
+                        package_info['source'] = 'unknown'
+                        package_info['scan_reason'] = 'not listed in official catalog'
+                        release_reasons.append(f"Addon '{addon_dir.name}' flagged as release: not listed in official catalog")
+                else:
+                    package_info['install_method'] = 'pre-installed'
+                    package_info['source'] = self.official_repo
+                    package_info['branch'] = self.official_repo_branch
+                    commit_hash = self._get_folder_commit_hash(addon_dir)
+                    if commit_hash:
+                        package_info['commit'] = commit_hash
+                    package_info['scan_reason'] = 'official catalog unavailable (assumed pre-installed)'
+
+                self.package_tracker.add_package(addon_dir.name, 'addon', package_info)
+                addon_count += 1
+
         # Scan plugins
         if self.plugins_dir.exists():
+            plugins_commit_hash = self._get_folder_commit_hash(self.plugins_dir)
             for plugin_file in self.plugins_dir.glob('*.dll'):
                 plugin_name = plugin_file.stem
-                
-                # Get commit hash for the plugins folder
-                commit_hash = self._get_folder_commit_hash(self.plugins_dir)
-                
-                # Add to tracker as pre-installed with official repo
                 package_info = {
-                    'source': self.official_repo,
-                    'install_method': 'pre-installed',
                     'installed_date': datetime.now().isoformat(),
-                    'path': str(plugin_file.relative_to(self.ashita_root)),
-                    'branch': self.official_repo_branch
+                    'path': str(plugin_file.relative_to(self.ashita_root))
                 }
-                
-                if commit_hash:
-                    package_info['commit'] = commit_hash
-                
+
+                plugin_repo_dir = self.plugins_dir / plugin_name
+                git_info = None
+                if plugin_repo_dir.exists() and plugin_repo_dir.is_dir():
+                    git_info = self._detect_git_metadata(plugin_repo_dir)
+
+                if git_info:
+                    package_info['install_method'] = 'git'
+                    package_info['source'] = git_info.get('source') or 'unknown'
+                    if git_info.get('branch'):
+                        package_info['branch'] = git_info['branch']
+                    if git_info.get('commit'):
+                        package_info['commit'] = git_info['commit']
+                    package_info['scan_reason'] = 'git metadata detected'
+                elif catalog_success:
+                    if plugin_name.lower() in official_plugins_lower:
+                        package_info['install_method'] = 'pre-installed'
+                        package_info['source'] = self.official_repo
+                        package_info['branch'] = self.official_repo_branch
+                        if plugins_commit_hash:
+                            package_info['commit'] = plugins_commit_hash
+                        package_info['scan_reason'] = 'listed in official catalog'
+                    else:
+                        package_info['install_method'] = 'release'
+                        package_info['source'] = 'unknown'
+                        package_info['scan_reason'] = 'not listed in official catalog'
+                        release_reasons.append(f"Plugin '{plugin_name}' flagged as release: not listed in official catalog")
+                else:
+                    package_info['install_method'] = 'pre-installed'
+                    package_info['source'] = self.official_repo
+                    package_info['branch'] = self.official_repo_branch
+                    if plugins_commit_hash:
+                        package_info['commit'] = plugins_commit_hash
+                    package_info['scan_reason'] = 'official catalog unavailable (assumed pre-installed)'
+
                 self.package_tracker.add_package(plugin_name, 'plugin', package_info)
                 plugin_count += 1
-        
-        return {'addons': addon_count, 'plugins': plugin_count}
+
+        result = {
+            'addons': addon_count,
+            'plugins': plugin_count,
+            'official_lookup': catalog_summary
+        }
+        if release_reasons:
+            result['release_flags'] = release_reasons
+        if not catalog_success and catalog.get('error'):
+            result['official_lookup_error'] = catalog['error']
+        return result
     
     def detect_package_type(self, url):
         """
