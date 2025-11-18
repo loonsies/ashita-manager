@@ -257,13 +257,20 @@ class PackageManager:
                         result = self._install_addon(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force)
                 else:
                     # Plugin repo: look for variant folders containing .dll files
+                    # For official repo, only look in plugins/ folder for the specific plugin
+                    # For other repos, check for variant subfolders
                     variants = []
                     try:
-                        for p in repo_path.rglob('*'):
-                            if p.is_dir():
-                                dlls = list(p.glob('*.dll'))
-                                if dlls:
-                                    variants.append({'path': p, 'name': p.name, 'dlls': dlls})
+                        if url == self.official_repo:
+                            # Official repo: use standard plugin detection (no variants)
+                            return self._install_plugin(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force)
+                        else:
+                            # Non-official repo: look for variant folders
+                            for p in repo_path.rglob('*'):
+                                if p.is_dir():
+                                    dlls = list(p.glob('*.dll'))
+                                    if dlls:
+                                        variants.append({'path': p, 'name': p.name, 'dlls': dlls})
                     except Exception:
                         variants = []
 
@@ -1453,6 +1460,15 @@ class PackageManager:
                 if install_method == 'git':
                     branch = self.official_repo_branch if source_url == self.official_repo else None
                     result = self.install_from_git(source_url, pkg_type, target_package_name=package_name, branch=branch)
+                    # install_from_git may request a variant selection (for plugin repos with multiple DLL variants).
+                    # Propagate that up so the UI can prompt the user instead of treating it as an unknown failure.
+                    if isinstance(result, dict) and result.get('requires_variant_selection'):
+                        result = result.copy()
+                        result.setdefault('error', 'Variant selection required')
+                        result['package_name'] = package_name
+                        result['pkg_type'] = pkg_type
+                        result['is_update'] = True
+                        return result
                 else:
                     preferred_asset_name = release_asset_name or package_info.get('release_asset_name')
                     result = self.install_from_release(
