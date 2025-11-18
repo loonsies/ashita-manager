@@ -346,8 +346,8 @@ class PackageManager:
                 release_url = self._get_latest_release_url(url, preferred_asset_name=asset_name)
             
             if isinstance(release_url, dict):
-                if release_url.get('error') == 'rate_limit':
-                    return {'success': False, 'error': release_url.get('message', 'GitHub API rate limit exceeded')}
+                if release_url.get('rate_limited'):
+                    return {'success': False, 'rate_limited': True, 'error': release_url.get('message', 'GitHub API rate limit exceeded')}
                 elif release_url.get('multiple_assets'):
                     assets = release_url['assets']
                     return {
@@ -701,6 +701,228 @@ class PackageManager:
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
+    def _clear_manual_artifacts(self, package_name):
+        docs_path = self.docs_dir / package_name
+        if docs_path.exists():
+            self._remove_directory_safe(docs_path)
+        resources_path = self.ashita_root / 'resources' / package_name
+        if resources_path.exists():
+            self._remove_directory_safe(resources_path)
+
+    def _copy_manual_docs(self, docs_source, package_name):
+        docs_source = Path(docs_source)
+        if not docs_source.exists() or not docs_source.is_dir():
+            raise ValueError('Documentation path is not a folder')
+        package_lower = package_name.lower()
+
+        # Decide which folder to copy so we preserve original structure but avoid double-nesting
+        # Prefer an inner folder that matches the package name if present, else use the selected folder
+        subdirs = [d for d in docs_source.iterdir() if d.is_dir() and not d.name.startswith('.')]
+        source_to_copy = None
+
+        # If docs_source contains a single subdirectory that matches the package name, use it
+        if len(subdirs) == 1 and subdirs[0].name.lower() == package_lower:
+            source_to_copy = subdirs[0]
+        # If docs_source contains a subfolder named after the package, prefer that
+        elif (docs_source / package_name).exists() and (docs_source / package_name).is_dir():
+            source_to_copy = docs_source / package_name
+        else:
+            for d in subdirs:
+                if d.name.lower() == package_lower:
+                    source_to_copy = d
+                    break
+
+        # Fallback to the selected folder itself
+        if source_to_copy is None:
+            source_to_copy = docs_source
+
+        target_docs = self.docs_dir / package_name
+        if target_docs.exists():
+            self._remove_directory_safe(target_docs)
+
+        # If the user selected a folder whose basename equals the package name, copy the *contents*
+        # so we don't end up with docs/MyAddon/MyAddon/...
+        if source_to_copy == docs_source and docs_source.name.lower() == package_lower:
+            target_docs.mkdir(parents=True, exist_ok=True)
+            for item in docs_source.iterdir():
+                if item.is_dir():
+                    shutil.copytree(item, target_docs / item.name)
+                else:
+                    shutil.copy2(item, target_docs / item.name)
+        else:
+            shutil.copytree(source_to_copy, target_docs)
+        
+        doc_files = []
+        for item in target_docs.rglob('*'):
+            if item.is_file():
+                try:
+                    rel_path = item.relative_to(self.ashita_root)
+                    doc_files.append(str(rel_path))
+                except ValueError:
+                    doc_files.append(str(item))
+        return doc_files
+
+    def _copy_manual_resources(self, resources_source, package_name):
+        resources_source = Path(resources_source)
+        if not resources_source.exists() or not resources_source.is_dir():
+            raise ValueError('Resources path is not a folder')
+        package_lower = package_name.lower()
+
+        subdirs = [d for d in resources_source.iterdir() if d.is_dir() and not d.name.startswith('.')]
+        source_to_copy = None
+
+        if len(subdirs) == 1 and subdirs[0].name.lower() == package_lower:
+            source_to_copy = subdirs[0]
+        elif (resources_source / package_name).exists() and (resources_source / package_name).is_dir():
+            source_to_copy = resources_source / package_name
+        else:
+            for d in subdirs:
+                if d.name.lower() == package_lower:
+                    source_to_copy = d
+                    break
+
+        if source_to_copy is None:
+            source_to_copy = resources_source
+
+        resources_root = self.ashita_root / 'resources'
+        resources_root.mkdir(parents=True, exist_ok=True)
+        target_resources = resources_root / package_name
+        if target_resources.exists():
+            self._remove_directory_safe(target_resources)
+
+        if source_to_copy == resources_source and resources_source.name.lower() == package_lower:
+            target_resources.mkdir(parents=True, exist_ok=True)
+            for item in resources_source.iterdir():
+                if item.is_dir():
+                    shutil.copytree(item, target_resources / item.name)
+                else:
+                    shutil.copy2(item, target_resources / item.name)
+        else:
+            shutil.copytree(source_to_copy, target_resources)
+        
+        resource_files = []
+        for item in target_resources.rglob('*'):
+            if item.is_file():
+                try:
+                    rel_path = item.relative_to(self.ashita_root)
+                    resource_files.append(str(rel_path))
+                except ValueError:
+                    resource_files.append(str(item))
+        return resource_files
+
+    def manual_install_addon(self, addon_path, docs_path=None, resources_path=None, expected_name=None):
+        try:
+            source_path = Path(addon_path)
+            if not source_path.exists():
+                return {'success': False, 'error': 'Selected addon folder does not exist'}
+
+            addon_info = self.detector.detect_addon_structure(source_path)
+            if not addon_info['found']:
+                return {'success': False, 'error': 'Could not detect addon entry point in selected folder'}
+
+            addon_name = addon_info['name']
+            if expected_name and addon_name.lower() != expected_name.lower():
+                return {'success': False, 'error': f'Selected addon "{addon_name}" does not match "{expected_name}"'}
+
+            addon_source = addon_info['path']
+            target_dir = self.addons_dir / addon_name
+            if target_dir.exists():
+                return {'success': False, 'error': f'Addon "{addon_name}" already exists'}
+
+            shutil.copytree(addon_source, target_dir)
+
+            package_info = {
+                'source': 'unknown',
+                'install_method': 'manual',
+                'installed_date': datetime.now().isoformat(),
+                'path': str(target_dir.relative_to(self.ashita_root))
+            }
+
+            self._clear_manual_artifacts(addon_name)
+
+            if docs_path:
+                try:
+                    doc_files = self._copy_manual_docs(docs_path, addon_name)
+                    if doc_files:
+                        package_info['doc_files'] = doc_files
+                except Exception as e:
+                    if target_dir.exists():
+                        self._remove_directory_safe(target_dir)
+                    self._clear_manual_artifacts(addon_name)
+                    return {'success': False, 'error': f'Failed to copy documentation: {e}'}
+
+            if resources_path:
+                try:
+                    resource_files = self._copy_manual_resources(resources_path, addon_name)
+                    if resource_files:
+                        package_info['resource_files'] = resource_files
+                except Exception as e:
+                    if target_dir.exists():
+                        self._remove_directory_safe(target_dir)
+                    self._clear_manual_artifacts(addon_name)
+                    return {'success': False, 'error': f'Failed to copy resources: {e}'}
+
+            self.package_tracker.add_package(addon_name, 'addon', package_info)
+            self.package_tracker.save_packages()
+
+            return {'success': True, 'message': f'Addon "{addon_name}" installed manually', 'package_name': addon_name}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
+    def manual_install_plugin(self, dll_path, docs_path=None, resources_path=None, expected_name=None):
+        try:
+            plugin_file = Path(dll_path)
+            if not plugin_file.exists() or plugin_file.suffix.lower() != '.dll':
+                return {'success': False, 'error': 'Please select a valid .dll file'}
+
+            plugin_name = plugin_file.stem
+            if expected_name and plugin_name.lower() != expected_name.lower():
+                return {'success': False, 'error': f'Selected plugin "{plugin_name}" does not match "{expected_name}"'}
+
+            target_dll = self.plugins_dir / f"{plugin_name}.dll"
+            if target_dll.exists():
+                return {'success': False, 'error': f'Plugin "{plugin_name}.dll" already exists'}
+
+            shutil.copy2(plugin_file, target_dll)
+
+            package_info = {
+                'source': 'unknown',
+                'install_method': 'manual',
+                'installed_date': datetime.now().isoformat(),
+                'path': str(target_dll.relative_to(self.ashita_root))
+            }
+
+            self._clear_manual_artifacts(plugin_name)
+
+            if docs_path:
+                try:
+                    doc_files = self._copy_manual_docs(docs_path, plugin_name)
+                    if doc_files:
+                        package_info['doc_files'] = doc_files
+                except Exception as e:
+                    if target_dll.exists():
+                        target_dll.unlink()
+                    self._clear_manual_artifacts(plugin_name)
+                    return {'success': False, 'error': f'Failed to copy documentation: {e}'}
+
+            if resources_path:
+                try:
+                    resource_files = self._copy_manual_resources(resources_path, plugin_name)
+                    if resource_files:
+                        package_info['resource_files'] = resource_files
+                except Exception as e:
+                    if target_dll.exists():
+                        target_dll.unlink()
+                    self._clear_manual_artifacts(plugin_name)
+                    return {'success': False, 'error': f'Failed to copy resources: {e}'}
+
+            self.package_tracker.add_package(plugin_name, 'plugin', package_info)
+            self.package_tracker.save_packages()
+
+            return {'success': True, 'message': f'Plugin "{plugin_name}" installed manually', 'package_name': plugin_name}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
     def _check_file_conflicts(self, source_path, package_name, source_url=None):
         """Check for file conflicts in libs/docs/resources folders. Returns dict with conflict info.
         
@@ -980,7 +1202,7 @@ class PackageManager:
             if response.status_code == 403:
                 error_data = response.json()
                 if 'rate limit' in error_data.get('message', '').lower():
-                    return {'error': 'rate_limit', 'message': 'GitHub API rate limit exceeded'}
+                    return {'rate_limited': True, 'message': 'GitHub API rate limit exceeded'}
             
             if response.status_code != 200:
                 return None
@@ -1134,7 +1356,7 @@ class PackageManager:
 
         return result
     
-    def update_package(self, package_name, pkg_type, release_asset_url=None, release_asset_name=None):
+    def update_package(self, package_name, pkg_type, release_asset_url=None, release_asset_name=None, manual_payload=None):
         """Update an existing package"""
         try:
             package_info = self.package_tracker.get_package(package_name, pkg_type)
@@ -1146,6 +1368,23 @@ class PackageManager:
             source_url = package_info.get('source')
             current_commit = package_info.get('commit')
             branch = package_info.get('branch', self.official_repo_branch)
+            old_package_info = package_info.copy()
+
+            requires_manual = install_method == 'manual' or (
+                install_method == 'release' and (not source_url or source_url == 'unknown')
+            )
+
+            if manual_payload:
+                return self._apply_manual_update(package_name, pkg_type, manual_payload, old_package_info)
+
+            if requires_manual:
+                return {
+                    'success': False,
+                    'requires_manual_update': True,
+                    'package_name': package_name,
+                    'pkg_type': pkg_type,
+                    'reason': 'manual' if install_method == 'manual' else 'unknown-source'
+                }
             
             # Handle pre-installed packages
             if install_method == 'pre-installed' or source_url == 'pre-installed':
@@ -1191,8 +1430,6 @@ class PackageManager:
                             'message': f'Package "{package_name}" is already up-to-date (release {current_release_tag})',
                             'already_updated': True
                         }
-            
-            old_package_info = package_info.copy()
             
             # Try to reinstall first (don't delete until we know it works)
             # Temporarily rename old files as backup
@@ -1291,6 +1528,77 @@ class PackageManager:
                 
         except Exception as e:
             return {'success': False, 'error': str(e)}
+
+    def _apply_manual_update(self, package_name, pkg_type, manual_payload, old_package_info):
+        backup_path = None
+        try:
+            if pkg_type == 'addon':
+                addon_path = manual_payload.get('addon_path')
+                if not addon_path:
+                    return {'success': False, 'error': 'Addon folder is required for manual update'}
+                target_dir = self.addons_dir / package_name
+                if target_dir.exists():
+                    backup_path = self.addons_dir / f"{package_name}.manual.backup"
+                    if backup_path.exists():
+                        self._remove_directory_safe(backup_path)
+                    shutil.move(str(target_dir), str(backup_path))
+                self._clear_manual_artifacts(package_name)
+                result = self.manual_install_addon(
+                    addon_path,
+                    docs_path=manual_payload.get('docs_path'),
+                    resources_path=manual_payload.get('resources_path'),
+                    expected_name=package_name
+                )
+            else:
+                dll_path = manual_payload.get('dll_path')
+                if not dll_path:
+                    return {'success': False, 'error': 'Plugin DLL is required for manual update'}
+                target_dll = self.plugins_dir / f"{package_name}.dll"
+                if target_dll.exists():
+                    backup_path = self.plugins_dir / f"{package_name}.dll.manual.backup"
+                    if backup_path.exists():
+                        backup_path.unlink()
+                    shutil.move(str(target_dll), str(backup_path))
+                self._clear_manual_artifacts(package_name)
+                result = self.manual_install_plugin(
+                    dll_path,
+                    docs_path=manual_payload.get('docs_path'),
+                    resources_path=manual_payload.get('resources_path'),
+                    expected_name=package_name
+                )
+
+            if result['success']:
+                if backup_path and backup_path.exists():
+                    if backup_path.is_dir():
+                        self._remove_directory_safe(backup_path)
+                    else:
+                        backup_path.unlink()
+                return {'success': True, 'message': f'Package "{package_name}" updated manually'}
+            else:
+                self._restore_manual_backup(package_name, pkg_type, backup_path)
+                self.package_tracker.add_package(package_name, pkg_type, old_package_info)
+                return {'success': False, 'error': result.get('error', 'Manual update failed')}
+        except Exception as e:
+            self._restore_manual_backup(package_name, pkg_type, backup_path)
+            self.package_tracker.add_package(package_name, pkg_type, old_package_info)
+            return {'success': False, 'error': str(e)}
+
+    def _restore_manual_backup(self, package_name, pkg_type, backup_path):
+        if not backup_path:
+            return
+        backup = Path(backup_path)
+        if not backup.exists():
+            return
+        if pkg_type == 'addon':
+            target_dir = self.addons_dir / package_name
+            if target_dir.exists():
+                self._remove_directory_safe(target_dir)
+            shutil.move(str(backup), str(target_dir))
+        else:
+            target_dll = self.plugins_dir / f"{package_name}.dll"
+            if target_dll.exists():
+                target_dll.unlink()
+            shutil.move(str(backup), str(target_dll))
     
     def _get_folder_commit_hash(self, folder_path):
         """Get the last commit hash that affected a specific folder"""
@@ -1517,7 +1825,6 @@ class PackageManager:
                         package_info['branch'] = git_info['branch']
                     if git_info.get('commit'):
                         package_info['commit'] = git_info['commit']
-                    package_info['scan_reason'] = 'git metadata detected'
                 elif catalog_success:
                     if addon_dir.name.lower() in official_addons_lower:
                         package_info['install_method'] = 'pre-installed'
@@ -1526,12 +1833,11 @@ class PackageManager:
                         commit_hash = self._get_folder_commit_hash(addon_dir)
                         if commit_hash:
                             package_info['commit'] = commit_hash
-                        package_info['scan_reason'] = 'listed in official catalog'
                     else:
-                        package_info['install_method'] = 'release'
+                        # Unknown source on disk and not listed in official catalog - treat as manual install
+                        package_info['install_method'] = 'manual'
                         package_info['source'] = 'unknown'
-                        package_info['scan_reason'] = 'not listed in official catalog'
-                        release_reasons.append(f"Addon '{addon_dir.name}' flagged as release: not listed in official catalog")
+                        release_reasons.append(f"Addon '{addon_dir.name}' flagged as manual: not listed in official catalog")
                 else:
                     package_info['install_method'] = 'pre-installed'
                     package_info['source'] = self.official_repo
@@ -1539,7 +1845,6 @@ class PackageManager:
                     commit_hash = self._get_folder_commit_hash(addon_dir)
                     if commit_hash:
                         package_info['commit'] = commit_hash
-                    package_info['scan_reason'] = 'official catalog unavailable (assumed pre-installed)'
 
                 self.package_tracker.add_package(addon_dir.name, 'addon', package_info)
                 addon_count += 1
@@ -1566,7 +1871,6 @@ class PackageManager:
                         package_info['branch'] = git_info['branch']
                     if git_info.get('commit'):
                         package_info['commit'] = git_info['commit']
-                    package_info['scan_reason'] = 'git metadata detected'
                 elif catalog_success:
                     if plugin_name.lower() in official_plugins_lower:
                         package_info['install_method'] = 'pre-installed'
@@ -1574,19 +1878,17 @@ class PackageManager:
                         package_info['branch'] = self.official_repo_branch
                         if plugins_commit_hash:
                             package_info['commit'] = plugins_commit_hash
-                        package_info['scan_reason'] = 'listed in official catalog'
                     else:
-                        package_info['install_method'] = 'release'
+                        # Unknown plugin not in official catalog - treat as manual install
+                        package_info['install_method'] = 'manual'
                         package_info['source'] = 'unknown'
-                        package_info['scan_reason'] = 'not listed in official catalog'
-                        release_reasons.append(f"Plugin '{plugin_name}' flagged as release: not listed in official catalog")
+                        release_reasons.append(f"Plugin '{plugin_name}' flagged as manual: not listed in official catalog")
                 else:
                     package_info['install_method'] = 'pre-installed'
                     package_info['source'] = self.official_repo
                     package_info['branch'] = self.official_repo_branch
                     if plugins_commit_hash:
                         package_info['commit'] = plugins_commit_hash
-                    package_info['scan_reason'] = 'official catalog unavailable (assumed pre-installed)'
 
                 self.package_tracker.add_package(plugin_name, 'plugin', package_info)
                 plugin_count += 1
@@ -1647,7 +1949,7 @@ class PackageManager:
 
             download_url = None
             if isinstance(release_info, dict):
-                if release_info.get('error') == 'rate_limit':
+                if release_info.get('rate_limited'):
                     return None
                 assets = release_info.get('assets', [])
                 if not assets:

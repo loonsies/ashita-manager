@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMessageBox, QProgressDialog, QGroupBox, QTextEdit,
                              QDialog, QDialogButtonBox, QFormLayout, QFileDialog,
                              QSpinBox, QScrollArea, QInputDialog, QStyle,
-                             QTreeWidget, QTreeWidgetItem)
+                             QTreeWidget, QTreeWidgetItem, QStackedWidget)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QIcon, QGuiApplication
 
@@ -78,19 +78,56 @@ class InstallWorker(QThread):
             self.finished.emit(False, str(e))
 
 
+class ManualInstallWorker(QThread):
+    finished = pyqtSignal(bool, str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, package_manager, payload):
+        super().__init__()
+        self.package_manager = package_manager
+        self.payload = payload
+
+    def run(self):
+        try:
+            pkg_type = self.payload.get('pkg_type')
+            if pkg_type == 'addon':
+                self.progress.emit("Copying addon files...")
+                result = self.package_manager.manual_install_addon(
+                    self.payload.get('addon_path'),
+                    docs_path=self.payload.get('docs_path'),
+                    resources_path=self.payload.get('resources_path')
+                )
+            else:
+                self.progress.emit("Copying plugin files...")
+                result = self.package_manager.manual_install_plugin(
+                    self.payload.get('dll_path'),
+                    docs_path=self.payload.get('docs_path'),
+                    resources_path=self.payload.get('resources_path')
+                )
+
+            if result.get('success'):
+                self.finished.emit(True, result.get('message', 'Manual installation completed'))
+            else:
+                self.finished.emit(False, result.get('error', 'Manual installation failed'))
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+
 class UpdateWorker(QThread):
     """Worker thread for package update"""
     finished = pyqtSignal(bool, str, bool)
     progress = pyqtSignal(str)
     variant_selection_requested = pyqtSignal(dict)
+    manual_update_requested = pyqtSignal(dict)
     
-    def __init__(self, package_manager, package_name, pkg_type, release_asset_url=None, release_asset_name=None):
+    def __init__(self, package_manager, package_name, pkg_type, release_asset_url=None, release_asset_name=None, manual_payload=None):
         super().__init__()
         self.package_manager = package_manager
         self.package_name = package_name
         self.pkg_type = pkg_type
         self.release_asset_url = release_asset_url
         self.release_asset_name = release_asset_name
+        self.manual_payload = manual_payload
     
     def run(self):
         try:
@@ -99,10 +136,14 @@ class UpdateWorker(QThread):
                 self.package_name,
                 self.pkg_type,
                 release_asset_url=self.release_asset_url,
-                release_asset_name=self.release_asset_name
+                release_asset_name=self.release_asset_name,
+                manual_payload=self.manual_payload
             )
             if result.get('requires_variant_selection'):
                 self.variant_selection_requested.emit(result)
+                return
+            if result.get('requires_manual_update'):
+                self.manual_update_requested.emit(result)
                 return
             
             if result['success']:
@@ -148,6 +189,12 @@ class BatchUpdateWorker(QThread):
             
             result = self.package_manager.update_package(package_name, self.pkg_type)
             
+            if result.get('requires_manual_update'):
+                failed += 1
+                reason = result.get('reason') or 'Manual input required'
+                self.log.emit(f"{package_name} requires manual update ({reason}). Skipping in batch.")
+                continue
+
             if result['success']:
                 if result.get('already_updated', False):
                     skipped += 1
@@ -177,6 +224,172 @@ class ScanWorker(QThread):
         except Exception as e:
             self.finished.emit({'addons': 0, 'plugins': 0, 'error': str(e)})
 
+
+class ManualPackageDialog(QDialog):
+    def __init__(self, parent=None, mode='install', pkg_type=None, package_name=None):
+        super().__init__(parent)
+        self.mode = mode
+        self.package_name = package_name
+        self.setWindowTitle("Manual Update" if mode == 'update' else "Manual Install")
+        self.setModal(True)
+        self.resize(520, 200)
+
+        layout = QVBoxLayout(self)
+
+        if package_name:
+            info_label = QLabel(f"Target package: {package_name}")
+            info_label.setStyleSheet("font-weight: bold;")
+            layout.addWidget(info_label)
+
+        type_layout = QHBoxLayout()
+        type_layout.addWidget(QLabel("Package type:"))
+        self.type_selector = QComboBox()
+        self.type_selector.addItems(["Addon", "Plugin"])
+        if pkg_type:
+            idx = 0 if pkg_type == 'addon' else 1
+            self.type_selector.setCurrentIndex(idx)
+            if mode == 'update':
+                self.type_selector.setEnabled(False)
+        type_layout.addWidget(self.type_selector)
+        type_layout.addStretch()
+        layout.addLayout(type_layout)
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._build_addon_form())
+        self.stack.addWidget(self._build_plugin_form())
+        layout.addWidget(self.stack)
+
+        self.type_selector.currentIndexChanged.connect(self.stack.setCurrentIndex)
+        
+        # Sync stack with initial type selection
+        if pkg_type:
+            self.stack.setCurrentIndex(0 if pkg_type == 'addon' else 1)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.button_box.accepted.connect(self._handle_accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+
+    def _build_addon_form(self):
+        widget = QWidget()
+        form = QFormLayout(widget)
+
+        self.addon_path_input = QLineEdit()
+        addon_browse = QPushButton("Browse...")
+        addon_browse.clicked.connect(lambda: self._browse_folder(self.addon_path_input, "Select addon folder"))
+        addon_row = QHBoxLayout()
+        addon_row.addWidget(self.addon_path_input)
+        addon_row.addWidget(addon_browse)
+        form.addRow("Addon folder:", addon_row)
+
+        self.addon_docs_input = QLineEdit()
+        docs_browse = QPushButton("Browse...")
+        docs_browse.clicked.connect(lambda: self._browse_folder(self.addon_docs_input, "Select docs folder"))
+        docs_row = QHBoxLayout()
+        docs_row.addWidget(self.addon_docs_input)
+        docs_row.addWidget(docs_browse)
+        form.addRow("Docs folder (optional):", docs_row)
+
+        self.addon_resources_input = QLineEdit()
+        res_browse = QPushButton("Browse...")
+        res_browse.clicked.connect(lambda: self._browse_folder(self.addon_resources_input, "Select resources folder"))
+        res_row = QHBoxLayout()
+        res_row.addWidget(self.addon_resources_input)
+        res_row.addWidget(res_browse)
+        form.addRow("Resources folder (optional):", res_row)
+
+        return widget
+
+    def _build_plugin_form(self):
+        widget = QWidget()
+        form = QFormLayout(widget)
+
+        self.plugin_dll_input = QLineEdit()
+        dll_browse = QPushButton("Browse...")
+        dll_browse.clicked.connect(self._browse_dll)
+        dll_row = QHBoxLayout()
+        dll_row.addWidget(self.plugin_dll_input)
+        dll_row.addWidget(dll_browse)
+        form.addRow("Plugin DLL:", dll_row)
+
+        self.plugin_docs_input = QLineEdit()
+        plugin_docs_browse = QPushButton("Browse...")
+        plugin_docs_browse.clicked.connect(lambda: self._browse_folder(self.plugin_docs_input, "Select docs folder"))
+        plugin_docs_row = QHBoxLayout()
+        plugin_docs_row.addWidget(self.plugin_docs_input)
+        plugin_docs_row.addWidget(plugin_docs_browse)
+        form.addRow("Docs folder (optional):", plugin_docs_row)
+
+        self.plugin_resources_input = QLineEdit()
+        plugin_res_browse = QPushButton("Browse...")
+        plugin_res_browse.clicked.connect(lambda: self._browse_folder(self.plugin_resources_input, "Select resources folder"))
+        plugin_res_row = QHBoxLayout()
+        plugin_res_row.addWidget(self.plugin_resources_input)
+        plugin_res_row.addWidget(plugin_res_browse)
+        form.addRow("Resources folder (optional):", plugin_res_row)
+
+        return widget
+
+    def _browse_folder(self, line_edit, caption):
+        folder = QFileDialog.getExistingDirectory(self, caption, os.path.expanduser("~"))
+        if folder:
+            line_edit.setText(folder)
+
+    def _browse_dll(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select plugin DLL", os.path.expanduser("~"), "DLL Files (*.dll)")
+        if file_path:
+            self.plugin_dll_input.setText(file_path)
+
+    def _selected_pkg_type(self):
+        return 'addon' if self.type_selector.currentIndex() == 0 else 'plugin'
+
+    def _handle_accept(self):
+        if not self._validate_inputs():
+            return
+        self.accept()
+
+    def _validate_inputs(self):
+        pkg_type = self._selected_pkg_type()
+        if pkg_type == 'addon':
+            path = self.addon_path_input.text().strip()
+            if not path:
+                self._show_error("Please select an addon folder.")
+                return False
+            if not os.path.isdir(path):
+                self._show_error("Addon folder does not exist.")
+                return False
+        else:
+            dll_path = self.plugin_dll_input.text().strip()
+            if not dll_path:
+                self._show_error("Please select a plugin DLL file.")
+                return False
+            if not os.path.isfile(dll_path) or not dll_path.lower().endswith('.dll'):
+                self._show_error("Invalid DLL file selected.")
+                return False
+        return True
+
+    def _show_error(self, message):
+        QMessageBox.warning(self, "Invalid input", message)
+
+    def get_payload(self):
+        pkg_type = self._selected_pkg_type()
+        if pkg_type == 'addon':
+            return {
+                'pkg_type': 'addon',
+                'addon_path': self.addon_path_input.text().strip(),
+                'docs_path': self._optional_path(self.addon_docs_input.text()),
+                'resources_path': self._optional_path(self.addon_resources_input.text())
+            }
+        return {
+            'pkg_type': 'plugin',
+            'dll_path': self.plugin_dll_input.text().strip(),
+            'docs_path': self._optional_path(self.plugin_docs_input.text()),
+            'resources_path': self._optional_path(self.plugin_resources_input.text())
+        }
+
+    def _optional_path(self, value):
+        value = (value or '').strip()
+        return value or None
 
 class SettingsDialog(QDialog):
     
@@ -492,6 +705,13 @@ class AshitaManagerUI(QMainWindow):
         if not icon.isNull():
             self.install_btn.setIcon(icon)
         url_layout.addWidget(self.install_btn)
+
+        self.manual_install_btn = QPushButton("Manual install...")
+        icon = self._std_icon('add')
+        if not icon.isNull():
+            self.manual_install_btn.setIcon(icon)
+        self.manual_install_btn.clicked.connect(self.open_manual_install_dialog)
+        url_layout.addWidget(self.manual_install_btn)
 
         install_layout.addLayout(url_layout)
         install_group.setLayout(install_layout)
@@ -1211,6 +1431,35 @@ class AshitaManagerUI(QMainWindow):
         else:
             self.log(f"Installation failed: {message}")
             self._show_centered_message(QMessageBox.Icon.Critical, "Error", f"Installation failed:\n{message}")
+
+    def open_manual_install_dialog(self):
+        dialog = ManualPackageDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        payload = dialog.get_payload()
+        if not payload:
+            return
+        pkg_label = 'addon' if payload.get('pkg_type') == 'addon' else 'plugin'
+        self.log(f"Starting manual install for {pkg_label}...")
+        self.progress = self._create_progress("Installing package...", None, 0, 0)
+        self.manual_install_worker = ManualInstallWorker(self.package_manager, payload)
+        self.manual_install_worker.progress.connect(self.update_progress)
+        self.manual_install_worker.progress.connect(self.log)
+        self.manual_install_worker.finished.connect(self.manual_install_finished)
+        self.manual_install_worker.start()
+
+    def manual_install_finished(self, success, message):
+        try:
+            self.progress.close()
+        except Exception:
+            pass
+        if success:
+            self.log(message)
+            self._show_centered_message(QMessageBox.Icon.Information, "Manual install", message)
+            self.refresh_package_lists()
+        else:
+            self.log(f"Manual install failed: {message}")
+            self._show_centered_message(QMessageBox.Icon.Warning, "Manual install failed", message)
     
     def handle_install_conflict(self, result):
         """Handle file conflicts detected during installation"""
@@ -1435,7 +1684,8 @@ class AshitaManagerUI(QMainWindow):
         categories = {
             'pre-installed': [],
             'git': [],
-            'release': []
+            'release': [],
+            'manual': []
         }
         
         for name, info in packages.items():
@@ -1447,11 +1697,12 @@ class AshitaManagerUI(QMainWindow):
         category_labels = {
             'pre-installed': 'Pre-installed',
             'git': 'Cloned from Git',
-            'release': 'Installed from Release'
+            'release': 'Installed from Release',
+            'manual': 'Manually installed'
         }
         
         total_count = 0
-        for category_key in ['pre-installed', 'git', 'release']:
+        for category_key in ['pre-installed', 'git', 'release', 'manual']:
             items = categories[category_key]
             if not items:
                 continue
@@ -1613,13 +1864,15 @@ class AshitaManagerUI(QMainWindow):
                 'package_name': package_name,
                 'pkg_type': pkg_type,
                 'release_asset_url': None,
-                'release_asset_name': None
+                'release_asset_name': None,
+                'manual_payload': None
             }
             self.update_worker = UpdateWorker(self.package_manager, package_name, pkg_type)
             self.update_worker.progress.connect(self.update_progress)
             self.update_worker.progress.connect(self.log)
             self.update_worker.finished.connect(self.update_finished)
             self.update_worker.variant_selection_requested.connect(self.handle_update_variant_selection)
+            self.update_worker.manual_update_requested.connect(self.handle_manual_update_request)
             self.update_worker.start()
         else:
             # Multiple packages - use batch update
@@ -1686,7 +1939,8 @@ class AshitaManagerUI(QMainWindow):
                 'package_name': result.get('package_name'),
                 'pkg_type': result.get('pkg_type'),
                 'release_asset_url': None,
-                'release_asset_name': None
+                'release_asset_name': None,
+                'manual_payload': None
             }
         else:
             if result.get('package_name'):
@@ -1708,6 +1962,7 @@ class AshitaManagerUI(QMainWindow):
         pkg_type = self._last_update_params.get('pkg_type')
         release_asset_url = self._last_update_params.get('release_asset_url')
         release_asset_name = self._last_update_params.get('release_asset_name')
+        self._last_update_params['manual_payload'] = None
 
         if not package_name or not pkg_type:
             self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Missing package information for update retry.")
@@ -1726,6 +1981,76 @@ class AshitaManagerUI(QMainWindow):
         self.update_worker.progress.connect(self.log)
         self.update_worker.finished.connect(self.update_finished)
         self.update_worker.variant_selection_requested.connect(self.handle_update_variant_selection)
+        self.update_worker.manual_update_requested.connect(self.handle_manual_update_request)
+        self.update_worker.start()
+
+    def handle_manual_update_request(self, result):
+        try:
+            self.progress.close()
+        except Exception:
+            pass
+
+        package_name = result.get('package_name')
+        pkg_type = result.get('pkg_type')
+        reason = result.get('reason', 'manual')
+
+        if package_name:
+            if reason == 'unknown-source':
+                self.log(f"{package_name} has no source URL; prompting for manual files.")
+            else:
+                self.log(f"{package_name} was installed manually; prompting for new files.")
+
+        dialog = ManualPackageDialog(self, mode='update', pkg_type=pkg_type, package_name=package_name)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.update_finished(False, "Manual update cancelled by user.", False)
+            return
+
+        payload = dialog.get_payload()
+        if not payload:
+            self.update_finished(False, "Manual update cancelled.", False)
+            return
+
+        if not self._last_update_params:
+            self._last_update_params = {
+                'package_name': package_name,
+                'pkg_type': pkg_type,
+                'release_asset_url': None,
+                'release_asset_name': None,
+                'manual_payload': None
+            }
+        else:
+            self._last_update_params['package_name'] = package_name
+            self._last_update_params['pkg_type'] = pkg_type
+
+        self._last_update_params['manual_payload'] = payload
+        self._retry_update_with_manual()
+
+    def _retry_update_with_manual(self):
+        if not self._last_update_params:
+            self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Update parameters not found.")
+            return
+
+        package_name = self._last_update_params.get('package_name')
+        pkg_type = self._last_update_params.get('pkg_type')
+        manual_payload = self._last_update_params.get('manual_payload')
+
+        if not package_name or not pkg_type or not manual_payload:
+            self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Manual update data missing.")
+            return
+
+        self.log(f"Retrying update for {package_name} with manual input...")
+        self.progress = self._create_progress(f"Updating {package_name}...", None, 0, 0)
+        self.update_worker = UpdateWorker(
+            self.package_manager,
+            package_name,
+            pkg_type,
+            manual_payload=manual_payload
+        )
+        self.update_worker.progress.connect(self.update_progress)
+        self.update_worker.progress.connect(self.log)
+        self.update_worker.finished.connect(self.update_finished)
+        self.update_worker.variant_selection_requested.connect(self.handle_update_variant_selection)
+        self.update_worker.manual_update_requested.connect(self.handle_manual_update_request)
         self.update_worker.start()
 
     def batch_update(self, pkg_type):
@@ -1879,7 +2204,7 @@ class AshitaManagerUI(QMainWindow):
                     # For plugins, check docs folder
                     package_dir = self.package_manager.docs_dir / package_name
                 
-                readme_files = ['README.md', 'readme.md', 'Readme.md', 'README.MD', 'README.txt', 'readme.txt', 'INDEX.html', 'index.html', 'Index.html', 'README.html', 'readme.html', 'Readme.html']
+                readme_files = ['README.md', 'readme.md', 'Readme.md', 'README.MD', 'README.txt', 'readme.txt', 'INDEX.html', 'index.html', 'Index.html', 'README.html', 'readme.html', 'Readme.html', 'README.htm', 'readme.htm', 'Readme.htm']
                 readme_path = None
                 
                 for readme_name in readme_files:
@@ -2084,7 +2409,8 @@ class AshitaManagerUI(QMainWindow):
         categories = {
             'pre-installed': [],
             'git': [],
-            'release': []
+            'release': [],
+            'manual': []
         }
 
         for plugin_name in sorted(installed_plugins.keys()):
@@ -2100,10 +2426,11 @@ class AshitaManagerUI(QMainWindow):
         category_labels = {
             'pre-installed': 'Pre-installed',
             'git': 'Cloned from Git',
-            'release': 'Installed from Release'
+            'release': 'Installed from Release',
+            'manual': 'Manually installed'
         }
 
-        for key in ['pre-installed', 'git', 'release']:
+        for key in ['pre-installed', 'git', 'release', 'manual']:
             names = categories.get(key, [])
             if not names:
                 continue
