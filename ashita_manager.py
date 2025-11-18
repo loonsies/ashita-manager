@@ -1313,8 +1313,14 @@ class AshitaManagerUI(QMainWindow):
             if official_lookup.get('success', False):
                 self.log("Official catalog lookup succeeded")
             else:
-                error_msg = official_lookup.get('error') or 'Unknown error'
-                self.log(f"Official catalog lookup failed: {error_msg}")
+                if official_lookup.get('rate_limited'):
+                    error_msg = official_lookup.get('error') or 'GitHub API rate limit exceeded'
+                    self.log(f"Official catalog lookup failed: {error_msg}")
+                    self._show_centered_message(QMessageBox.Icon.Warning, "Rate limit exceeded", 
+                        f"GitHub API rate limit exceeded.\n\nPlease wait before retrying or configure a GitHub token in Settings for higher limits.")
+                else:
+                    error_msg = official_lookup.get('error') or 'Unknown error'
+                    self.log(f"Official catalog lookup failed: {error_msg}")
 
         for flag in results.get('release_flags', []):
             self.log(flag)

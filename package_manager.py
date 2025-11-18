@@ -1320,7 +1320,8 @@ class PackageManager:
             'addons': set(),
             'plugins': set(),
             'success': False,
-            'error': None
+            'error': None,
+            'rate_limited': False
         }
         try:
             base_url = "https://api.github.com/repos/AshitaXI/Ashita-v4beta/contents"
@@ -1334,6 +1335,21 @@ class PackageManager:
             ref = f"?ref={branch}" if branch else ''
             addons_resp = requests.get(f"{base_url}/addons{ref}", headers=headers or None, timeout=10)
             plugins_resp = requests.get(f"{base_url}/plugins{ref}", headers=headers or None, timeout=10)
+
+            is_rate_limited = False
+            if addons_resp.status_code == 403 or plugins_resp.status_code == 403:
+                try:
+                    resp_with_error = addons_resp if addons_resp.status_code == 403 else plugins_resp
+                    error_data = resp_with_error.json()
+                    if 'rate limit' in error_data.get('message', '').lower():
+                        is_rate_limited = True
+                except Exception:
+                    is_rate_limited = True
+            
+            if is_rate_limited:
+                result['rate_limited'] = True
+                result['error'] = 'GitHub API rate limit exceeded. Please wait or configure a GitHub token in Settings.'
+                return result
 
             if addons_resp.status_code == 200:
                 for entry in addons_resp.json():
@@ -1460,8 +1476,6 @@ class PackageManager:
                 if install_method == 'git':
                     branch = self.official_repo_branch if source_url == self.official_repo else None
                     result = self.install_from_git(source_url, pkg_type, target_package_name=package_name, branch=branch)
-                    # install_from_git may request a variant selection (for plugin repos with multiple DLL variants).
-                    # Propagate that up so the UI can prompt the user instead of treating it as an unknown failure.
                     if isinstance(result, dict) and result.get('requires_variant_selection'):
                         result = result.copy()
                         result.setdefault('error', 'Variant selection required')
@@ -1492,17 +1506,6 @@ class PackageManager:
                             self._remove_directory_safe(backup_path)
                         else:
                             backup_path.unlink()
-                    
-                    # Remove old docs
-                    docs_path = self.docs_dir / package_name
-                    if docs_path.exists():
-                        self._remove_directory_safe(docs_path)
-                    
-                    # Remove old resources
-                    resources_dir = self.ashita_root / 'resources'
-                    resources_path = resources_dir / package_name
-                    if resources_path.exists():
-                        self._remove_directory_safe(resources_path)
                     
                     return {'success': True, 'message': f'Package "{package_name}" updated successfully'}
                 else:
