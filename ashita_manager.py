@@ -2147,24 +2147,17 @@ class AshitaManagerUI(QMainWindow):
         tree_widget = self.script_addons_list if pkg_type == 'addon' else self.script_plugins_list
         search_text = (self.script_addons_search.text() if pkg_type == 'addon' else self.script_plugins_search.text()).lower()
 
-        # Iterate through categories
+        # Iterate through top-level items
         for i in range(tree_widget.topLevelItemCount()):
-            category_item = tree_widget.topLevelItem(i)
-            category_has_visible = False
+            item = tree_widget.topLevelItem(i)
+            data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+            name = data.get('name', '')
             
-            # Check children
-            for j in range(category_item.childCount()):
-                child = category_item.child(j)
-                item_text = child.text(0).lower()
-                
-                if not search_text or search_text in item_text:
-                    child.setHidden(False)
-                    category_has_visible = True
-                else:
-                    child.setHidden(True)
-            
-            # Hide category if no children are visible
-            category_item.setHidden(not category_has_visible and bool(search_text))
+            # Show item if search text matches the addon/plugin name
+            if not search_text or search_text in name.lower():
+                item.setHidden(False)
+            else:
+                item.setHidden(True)
     
     def filter_available_list(self, pkg_type):
         """Filter available packages by search text.
