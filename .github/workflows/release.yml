@@ -34,7 +34,7 @@ jobs:
       shell: powershell
       run: |
         $path = 'ashita_manager.py'
-        (Get-Content -Raw $path) -replace '(?<=__version__ = \")[^\"]*', '${{ github.event.inputs.version }}' | Set-Content $path
+        (Get-Content -Raw $path) -replace '(?<=__version__ = ")[^"]*', '${{ github.event.inputs.version }}' | Set-Content $path
 
     - name: Build EXE with PyInstaller
       run: |
@@ -45,8 +45,8 @@ jobs:
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
         git add ashita_manager.py
-        git commit -m "Bump version to ${{ github.event.inputs.version }}"
-        git push origin HEAD:main
+        git commit -m "Bump version to ${{ github.event.inputs.version }}" || echo "No changes to commit"
+        git push origin HEAD:main || echo "Push failed (likely no changes)"
       continue-on-error: true
 
     - name: Create tag
@@ -59,22 +59,21 @@ jobs:
       id: changelog
       shell: powershell
       run: |
-        # Avoid terminating on non-zero native command exit codes
         $ErrorActionPreference = 'SilentlyContinue'
 
-        # Try to get the previous tag; git returns non-zero when none exists
         $PREV_TAG = git describe --tags --abbrev=0 HEAD^ 2>$null
 
         if (-not $PREV_TAG -or $LASTEXITCODE -ne 0) {
-          $CHANGELOG = 'Initial release'
+          $CHANGELOG = "Initial release"
         } else {
           $RANGE = "$PREV_TAG..HEAD"
-          $CHANGELOG = git log --pretty=format:'- [`%h`](https://github.com/${{ github.repository }}/commit/%H) %s' $RANGE
+          $CHANGELOG = git log $RANGE --pretty=format:"- [`%h`](https://github.com/${{ github.repository }}/commit/%H) %s"
         }
 
-        # Always write output and return success
-        echo "changelog=$CHANGELOG" >> $env:GITHUB_OUTPUT
-        exit 0
+        # Ensure newlines are preserved for GitHub Actions
+        echo "changelog<<EOF" >> $env:GITHUB_OUTPUT
+        echo "$CHANGELOG" >> $env:GITHUB_OUTPUT
+        echo "EOF" >> $env:GITHUB_OUTPUT
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
