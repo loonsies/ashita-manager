@@ -2912,7 +2912,8 @@ class AshitaManagerUI(QMainWindow):
         categories = {
             'pre-installed': [],
             'git': [],
-            'release': []
+            'release': [],
+            'manual': []
         }
 
         for addon_name in sorted(installed_addons.keys()):
@@ -2927,10 +2928,11 @@ class AshitaManagerUI(QMainWindow):
         category_labels = {
             'pre-installed': 'Pre-installed',
             'git': 'Cloned from Git',
-            'release': 'Installed from Release'
+            'release': 'Installed from Release',
+            'manual': 'Manually installed'
         }
 
-        for key in ['pre-installed', 'git', 'release']:
+        for key in ['pre-installed', 'git', 'release', 'manual']:
             names = categories.get(key, [])
             if not names:
                 continue
