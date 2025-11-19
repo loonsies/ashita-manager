@@ -3,7 +3,7 @@ Ashita v4 Addon/Plugin Manager
 A PyQt6-based package manager for Ashita v4 addons and plugins
 """
 
-__version__ = "1.0"
+__version__ = "1.1"
 
 import sys
 import os
@@ -3447,3 +3447,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
