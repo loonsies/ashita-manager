@@ -456,6 +456,41 @@ class PackageManager:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
                 
+                # Check if the downloaded file is a .dll directly
+                if release_asset_name and release_asset_name.lower().endswith('.dll'):
+                    # Handle direct .dll file for plugins
+                    if pkg_type == 'plugin':
+                        dll_file = zip_path  # It's actually the dll file, not a zip
+                        dll_file_renamed = temp_path / release_asset_name
+                        dll_file.rename(dll_file_renamed) if dll_file != dll_file_renamed else None
+                        
+                        plugin_name = dll_file_renamed.stem
+                        target_dll = self.plugins_dir / f"{plugin_name}.dll"
+                        
+                        if target_dll.exists():
+                            existing_pkg = self.package_tracker.get_package(plugin_name, 'plugin')
+                            if existing_pkg and existing_pkg.get('source') == self.official_repo and url == self.official_repo:
+                                target_dll.unlink()
+                            else:
+                                return {'success': False, 'error': f'Plugin "{plugin_name}.dll" already exists'}
+                        
+                        shutil.copy2(dll_file_renamed, target_dll)
+                        
+                        release_tag = self._get_release_tag(url)
+                        package_info = {
+                            'source': url,
+                            'install_method': 'release',
+                            'installed_date': datetime.now().isoformat(),
+                            'path': str(target_dll.relative_to(self.ashita_root)),
+                            'release_tag': release_tag,
+                            'release_asset_name': release_asset_name
+                        }
+                        self.package_tracker.add_package(plugin_name, 'plugin', package_info)
+                        self.package_tracker.save_packages()
+                        return {'success': True, 'message': f'Plugin "{plugin_name}" installed successfully'}
+                    else:
+                        return {'success': False, 'error': f'Cannot install addon from .dll file. Expected .zip archive'}
+                
                 extract_path = temp_path / 'extracted'
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                     zip_ref.extractall(extract_path)
@@ -2562,6 +2597,7 @@ class PackageManager:
             release_info = self._get_latest_release_url(url)
 
             download_url = None
+            asset_name = None
             if isinstance(release_info, dict):
                 if release_info.get('rate_limited'):
                     return None
@@ -2572,13 +2608,20 @@ class PackageManager:
                 zip_asset = next((a for a in assets if a['name'].lower().endswith('.zip')), None)
                 candidate = zip_asset or assets[0]
                 download_url = candidate.get('url') or candidate.get('download_url') or candidate.get('browser_download_url')
+                asset_name = candidate.get('name', '')
             elif isinstance(release_info, tuple):
                 download_url = release_info[0]
+                asset_name = release_info[1] if len(release_info) > 1 else ''
             else:
                 download_url = release_info
+                asset_name = ''
 
             if not download_url:
                 return None
+
+            # Check if it's a direct .dll file
+            if asset_name and asset_name.lower().endswith('.dll'):
+                return 'plugin'
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
