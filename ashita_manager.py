@@ -1899,7 +1899,7 @@ class AshitaManagerUI(QMainWindow):
         
         choice, ok = QInputDialog.getItem(
             self, 
-            "Select Addon Entrypoint", 
+            "Select addon entrypoint", 
             "Multiple lua files found. Select the main addon file:", 
             lua_files, 
             0, 

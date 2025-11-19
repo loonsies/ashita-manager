@@ -126,7 +126,7 @@ class FolderStructureDetector:
         lua_files = list(actual_source.glob('*.lua'))
         if lua_files:
             # Infer addon name from the lua file or parent folder
-            addon_name = self._infer_addon_name(actual_source, lua_files, repo_url)
+            addon_name = self._infer_addon_name(lua_files, repo_url)
             if addon_name:
                 return {
                     'found': True,
@@ -228,53 +228,52 @@ class FolderStructureDetector:
         
         return {'found': False, 'name': None, 'dll_path': None}
     
-    def _infer_addon_name(self, folder_path, lua_files, repo_url=None):
+    def _infer_addon_name(self, lua_files, repo_url=None):
         """Infer addon name from folder path and lua files.
         
         Args:
-            folder_path: Path to the addon folder
             lua_files: List of lua file Paths in the folder
             repo_url: Optional repository URL to extract addon name from
         
         Returns:
             str - The inferred addon name, or None if cannot determine
         """
-        folder_path = Path(folder_path)
-        folder_name = folder_path.name
-        folder_name_lower = folder_name.lower()
         
         # Step 0: Check if repo URL provides a name match
         if repo_url:
             repo_name = repo_url.rstrip('/').split('/')[-1].lower()
+            # Check for exact match first
             for lua_file in lua_files:
                 if lua_file.stem.lower() == repo_name:
                     return lua_file.stem
+        else:
+            repo_name = None
         
         # Step 1: If only one lua file exists, it's probably the main one
         if len(lua_files) == 1:
             return lua_files[0].stem
         
-        # Step 2: Check if any lua file name exactly matches the folder name (case-insensitive)
+        # Step 2: Check if any lua file name exactly matches the repo name (case-insensitive)
         for lua_file in lua_files:
-            if lua_file.stem.lower() == folder_name_lower:
+            if lua_file.stem.lower() == repo_name:
                 return lua_file.stem
         
-        # Step 3: Check if any lua file name is a substring match with the folder name
+        # Step 3: Check if any lua file name is a substring match with the repo name
         best_match = None
         best_match_length = 0
         
         for lua_file in lua_files:
             lua_name_lower = lua_file.stem.lower()
             
-            # Check if lua name appears in folder name
-            if lua_name_lower in folder_name_lower and len(lua_name_lower) > best_match_length:
+            # Check if lua name appears in repo name
+            if repo_name and lua_name_lower in repo_name and len(lua_name_lower) > best_match_length:
                 best_match = lua_file.stem
                 best_match_length = len(lua_name_lower)
             
-            # Check if folder name appears in lua name
-            elif folder_name_lower in lua_name_lower and len(folder_name_lower) > best_match_length:
+            # Check if repo name appears in lua name
+            elif repo_name and repo_name in lua_name_lower and len(repo_name) > best_match_length:
                 best_match = lua_file.stem
-                best_match_length = len(folder_name_lower)
+                best_match_length = len(repo_name)
         
         if best_match and best_match_length >= 3:  # Require at least 3 chars to match
             return best_match
