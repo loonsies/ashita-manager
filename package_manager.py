@@ -709,7 +709,7 @@ class PackageManager:
         """
         try:
             repo_root = source_path
-            addon_info = self.detector.detect_addon_structure(source_path, target_name)
+            addon_info = self.detector.detect_addon_structure(source_path, target_name, url)
             
             # Handle ambiguous addon name detection
             if not addon_info['found'] and addon_info.get('ambiguous'):

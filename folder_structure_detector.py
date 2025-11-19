@@ -64,12 +64,13 @@ class FolderStructureDetector:
         
         return []
     
-    def detect_addon_structure(self, source_path, target_name=None):
+    def detect_addon_structure(self, source_path, target_name=None, repo_url=None):
         """Detect addon folder structure.
         
         Args:
             source_path: Path to search for addon
             target_name: Optional specific addon name to find (useful for monorepos)
+            repo_url: Optional repository URL to extract addon name from
         
         Returns:
             A dict with:
@@ -125,7 +126,7 @@ class FolderStructureDetector:
         lua_files = list(actual_source.glob('*.lua'))
         if lua_files:
             # Infer addon name from the lua file or parent folder
-            addon_name = self._infer_addon_name(actual_source, lua_files)
+            addon_name = self._infer_addon_name(actual_source, lua_files, repo_url)
             if addon_name:
                 return {
                     'found': True,
@@ -227,12 +228,13 @@ class FolderStructureDetector:
         
         return {'found': False, 'name': None, 'dll_path': None}
     
-    def _infer_addon_name(self, folder_path, lua_files):
+    def _infer_addon_name(self, folder_path, lua_files, repo_url=None):
         """Infer addon name from folder path and lua files.
         
         Args:
             folder_path: Path to the addon folder
             lua_files: List of lua file Paths in the folder
+            repo_url: Optional repository URL to extract addon name from
         
         Returns:
             str - The inferred addon name, or None if cannot determine
@@ -241,12 +243,23 @@ class FolderStructureDetector:
         folder_name = folder_path.name
         folder_name_lower = folder_name.lower()
         
-        # Step 1: Check if any lua file name exactly matches the folder name
+        # Step 0: Check if repo URL provides a name match
+        if repo_url:
+            repo_name = repo_url.rstrip('/').split('/')[-1].lower()
+            for lua_file in lua_files:
+                if lua_file.stem.lower() == repo_name:
+                    return lua_file.stem
+        
+        # Step 1: If only one lua file exists, it's probably the main one
+        if len(lua_files) == 1:
+            return lua_files[0].stem
+        
+        # Step 2: Check if any lua file name exactly matches the folder name (case-insensitive)
         for lua_file in lua_files:
             if lua_file.stem.lower() == folder_name_lower:
                 return lua_file.stem
         
-        # Step 2: Check if any lua file name is a substring match with the folder name
+        # Step 3: Check if any lua file name is a substring match with the folder name
         best_match = None
         best_match_length = 0
         
@@ -266,11 +279,7 @@ class FolderStructureDetector:
         if best_match and best_match_length >= 3:  # Require at least 3 chars to match
             return best_match
         
-        # Step 3: If only one lua file exists, it's probably the main one
-        if len(lua_files) == 1:
-            return lua_files[0].stem
-        
-        # Step 4: Return None to signal that user selection is needed
+        # Step 3: Return None to signal that user selection is needed
         return None
     
     def has_docs_folder(self, source_path):
