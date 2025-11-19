@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import zipfile
 import stat
+import hashlib
 import requests
 import time
 from datetime import datetime
@@ -20,6 +21,12 @@ from folder_structure_detector import FolderStructureDetector
 
 class PackageManager:
     def __init__(self, ashita_root, package_tracker):
+        """Initialize package manager.
+        
+        Args:
+            ashita_root: str/Path - Root directory of Ashita installation
+            package_tracker: PackageTracker - Package tracking instance
+        """
         self.ashita_root = Path(ashita_root)
         self.addons_dir = self.ashita_root / "addons"
         self.plugins_dir = self.ashita_root / "plugins"
@@ -35,14 +42,31 @@ class PackageManager:
         self.docs_dir.mkdir(exist_ok=True)
 
     def _run_command(self, cmd, cwd=None, **kwargs):
-        """Run a subprocess command while avoiding creating a new console window on Windows."""
+        """Run a subprocess command while avoiding new console window on Windows.
+        
+        Args:
+            cmd: list - Command and arguments
+            cwd: Optional str - Working directory
+            **kwargs: Additional subprocess.run arguments
+        
+        Returns:
+            subprocess.CompletedProcess - Process result with returncode, stdout, stderr
+        """
         if os.name == 'nt':
             kwargs.setdefault('creationflags', subprocess.CREATE_NO_WINDOW)
         return subprocess.run(cmd, cwd=cwd, **kwargs)
     
     def _handle_remove_readonly(self, func, path, exc):
-        """Error handler for Windows file deletion issues"""
-        # Handle readonly and locked files
+        """Handle Windows file deletion errors.
+        
+        Args:
+            func: callable - Function that raised the error
+            path: str - File path causing the error
+            exc: Exception - Exception info tuple
+        
+        Returns:
+            None - Handles error in-place
+        """
         try:
             os.chmod(path, stat.S_IWRITE)
             func(path)
@@ -50,7 +74,18 @@ class PackageManager:
             pass
 
     def _detect_git_metadata(self, repo_path):
-        """Return basic git metadata (remote, branch, commit) for a local repo if .git exists."""
+        """Extract git metadata from local repository.
+        
+        Args:
+            repo_path: str/Path - Path to git repository
+        
+        Returns:
+            dict - Git metadata with keys:
+            - remote: str - Origin URL
+            - branch: str - Current branch name
+            - commit: str - Current commit hash
+            Or empty dict if not a valid git repository
+        """
         repo_path = Path(repo_path)
         if not (repo_path / '.git').exists():
             return None
@@ -98,7 +133,14 @@ class PackageManager:
         return metadata if metadata else None
     
     def _remove_directory_safe(self, path):
-        """Safely remove a directory handling Windows file locks"""
+        """Safely remove directory handling Windows file locks.
+        
+        Args:
+            path: str/Path - Directory to remove
+        
+        Returns:
+            bool - True if successfully removed, False if failed
+        """
         if not path.exists():
             return
         
@@ -120,7 +162,11 @@ class PackageManager:
                     raise
     
     def _detect_current_branch(self):
-        """Detect the current git branch of the Ashita installation"""
+        """Detect current git branch of Ashita installation.
+        
+        Returns:
+            str - Branch name or 'main' if detection fails
+        """
         try:
             result = self._run_command(
                 ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
@@ -138,15 +184,26 @@ class PackageManager:
         # Default to main if detection fails
         return 'main'
     
-    def install_from_git(self, url, pkg_type, target_package_name=None, branch=None, force=False, plugin_variant=None):
-        """Install a package by cloning from git
+    def install_from_git(self, url, pkg_type, target_package_name=None, branch=None, force=False, plugin_variant=None, selected_entrypoint=None):
+        """Install a package by cloning from git.
         
         Args:
             url: Git repository URL
-            pkg_type: 'addon' or 'plugin'
-            target_package_name: Optional specific package name to extract (for monorepos)
-            branch: Optional specific branch to clone (defaults to repo's default)
-            force: Skip conflict checking if True
+            pkg_type: str - 'addon' or 'plugin'
+            target_package_name: Optional str - specific package name to extract (for monorepos)
+            branch: Optional str - specific branch to clone (defaults to repo's default)
+            force: bool - Skip conflict checking if True
+            plugin_variant: Optional str - specific plugin variant to install
+            selected_entrypoint: Optional str - entrypoint lua file name for ambiguous addon detection
+        
+        Returns:
+            dict - Installation result with keys:
+            - success: bool - whether installation succeeded
+            - message: str - success message
+            - error: str - error message if failed
+            - requires_confirmation: bool - file conflicts detected
+            - requires_variant_selection: bool - user selection needed
+            - requires_entrypoint_selection: bool - lua file selection needed
         """
         try:
             # Create temporary directory for cloning
@@ -254,7 +311,7 @@ class PackageManager:
                             return {'success': False, 'error': error_msg}
                     else:
                         # Single addon
-                        result = self._install_addon(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force)
+                        result = self._install_addon(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force, selected_entrypoint=selected_entrypoint)
                 else:
                     # Plugin repo: look for variant folders containing .dll files
                     # For official repo, only look in plugins/ folder for the specific plugin
@@ -345,7 +402,21 @@ class PackageManager:
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def install_from_release(self, url, pkg_type, force=False, plugin_variant=None, asset_download_url=None, asset_name=None):
+    def install_from_release(self, url, pkg_type, force=False, plugin_variant=None, asset_download_url=None, asset_name=None, selected_entrypoint=None):
+        """Install a package from a GitHub release.
+        
+        Args:
+            url: str - Repository URL
+            pkg_type: str - 'addon' or 'plugin'
+            force: bool - Skip conflict checking if True
+            plugin_variant: Optional str - specific plugin variant to install
+            asset_download_url: Optional str - direct download URL for specific asset
+            asset_name: Optional str - preferred asset name
+            selected_entrypoint: Optional str - entrypoint lua file name for ambiguous addon detection
+        
+        Returns:
+            dict - Installation result with same keys as install_from_git
+        """
         try:
             if asset_download_url:
                 release_url = (asset_download_url, asset_name or self._infer_asset_name(asset_download_url))
@@ -399,7 +470,8 @@ class PackageManager:
                         None,
                         release_tag,
                         force=force,
-                        release_asset_name=release_asset_name
+                        release_asset_name=release_asset_name,
+                        selected_entrypoint=selected_entrypoint
                     )
                 else:
                     # Search extracted tree for variant folders containing DLLs
@@ -492,7 +564,21 @@ class PackageManager:
             return {'success': False, 'error': str(e)}
     
     def _install_single_addon(self, addon_info, url, commit_hash=None, branch_name=None, release_tag=None, repo_root=None, force=False, release_asset_name=None):
-        """Install a single addon from addon_info dict (used for monorepos)"""
+        """Install single addon from monorepo addon_info dict.
+        
+        Args:
+            addon_info: dict - Addon info with keys: name, path, structure
+            url: str - Source repository URL
+            commit_hash: Optional str - Git commit hash
+            branch_name: Optional str - Git branch name
+            release_tag: Optional str - Release tag
+            repo_root: Optional str/Path - Root directory of extracted repo
+            force: bool - Skip conflict checking
+            release_asset_name: Optional str - Release asset filename
+        
+        Returns:
+            dict - Installation result with success/error and package info
+        """
         try:
             addon_name = addon_info['name']
             addon_source = addon_info['path']
@@ -565,12 +651,52 @@ class PackageManager:
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
-    def _install_addon(self, source_path, url, commit_hash=None, branch_name=None, release_tag=None, target_name=None, force=False, release_asset_name=None):
+    def _install_addon(self, source_path, url, commit_hash=None, branch_name=None, release_tag=None, target_name=None, force=False, release_asset_name=None, selected_entrypoint=None):
+        """Install addon from extracted source directory.
+        
+        Args:
+            source_path: str/Path - Extracted addon source directory
+            url: str - Source repository URL
+            commit_hash: Optional str - Git commit hash
+            branch_name: Optional str - Git branch name
+            release_tag: Optional str - Release tag
+            target_name: Optional str - Specific addon name to install (for monorepos)
+            force: bool - Skip conflict checking
+            release_asset_name: Optional str - Release asset filename
+            selected_entrypoint: Optional str - Entrypoint lua file for ambiguous addons
+        
+        Returns:
+            dict - Installation result with keys:
+            - success: bool - Whether installation succeeded
+            - requires_entrypoint_selection: bool - User lua file selection needed
+            - lua_files: list - Available lua files (if ambiguous)
+            - error: str - Error message if failed
+        """
         try:
             repo_root = source_path
             addon_info = self.detector.detect_addon_structure(source_path, target_name)
             
-            if not addon_info['found']:
+            # Handle ambiguous addon name detection
+            if not addon_info['found'] and addon_info.get('ambiguous'):
+                if not selected_entrypoint:
+                    # Return lua files for user to select
+                    return {
+                        'success': False,
+                        'requires_entrypoint_selection': True,
+                        'lua_files': addon_info['lua_files'],
+                        'source_url': url,
+                        'is_git': bool(commit_hash),
+                        'is_release': bool(release_tag)
+                    }
+                else:
+                    # User has selected an entrypoint
+                    addon_info = {
+                        'found': True,
+                        'name': selected_entrypoint,
+                        'path': addon_info['path'],
+                        'structure': addon_info['structure']
+                    }
+            elif not addon_info['found']:
                 return {'success': False, 'error': 'Could not detect addon structure'}
             
             addon_name = addon_info['name']
@@ -642,6 +768,23 @@ class PackageManager:
             return {'success': False, 'error': str(e)}
     
     def _install_plugin(self, source_path, url, commit_hash=None, branch_name=None, release_tag=None, target_name=None, force=False, release_asset_name=None):
+        """Install plugin from extracted source directory.
+        
+        Args:
+            source_path: str/Path - Extracted plugin source directory
+            url: str - Source repository URL
+            commit_hash: Optional str - Git commit hash
+            branch_name: Optional str - Git branch name
+            release_tag: Optional str - Release tag
+            target_name: Optional str - Specific plugin name to install (for monorepos)
+            force: bool - Skip conflict checking
+            release_asset_name: Optional str - Release asset filename
+        
+        Returns:
+            dict - Installation result with keys:
+            - success: bool - Whether installation succeeded
+            - error: str - Error message if failed
+        """
         try:
             repo_root = source_path
             plugin_info = self.detector.detect_plugin_structure(source_path, target_name)
@@ -709,6 +852,14 @@ class PackageManager:
             return {'success': False, 'error': str(e)}
     
     def _clear_manual_artifacts(self, package_name):
+        """Clear documentation and resource folders for a package.
+        
+        Args:
+            package_name: str - Name of package to clear
+        
+        Returns:
+            None
+        """
         docs_path = self.docs_dir / package_name
         if docs_path.exists():
             self._remove_directory_safe(docs_path)
@@ -717,6 +868,15 @@ class PackageManager:
             self._remove_directory_safe(resources_path)
 
     def _copy_manual_docs(self, docs_source, package_name):
+        """Copy documentation folder to package docs directory.
+        
+        Args:
+            docs_source: str/Path - Source documentation folder
+            package_name: str - Target package name
+        
+        Returns:
+            None - Raises ValueError if docs_source is invalid
+        """
         docs_source = Path(docs_source)
         if not docs_source.exists() or not docs_source.is_dir():
             raise ValueError('Documentation path is not a folder')
@@ -770,6 +930,15 @@ class PackageManager:
         return doc_files
 
     def _copy_manual_resources(self, resources_source, package_name):
+        """Copy resources folder to ashita resources directory.
+        
+        Args:
+            resources_source: str/Path - Source resources folder
+            package_name: str - Target package name
+        
+        Returns:
+            None - Raises ValueError if resources_source is invalid
+        """
         resources_source = Path(resources_source)
         if not resources_source.exists() or not resources_source.is_dir():
             raise ValueError('Resources path is not a folder')
@@ -817,14 +986,49 @@ class PackageManager:
                     resource_files.append(str(item))
         return resource_files
 
-    def manual_install_addon(self, addon_path, docs_path=None, resources_path=None, expected_name=None):
+    def manual_install_addon(self, addon_path, docs_path=None, resources_path=None, expected_name=None, selected_entrypoint=None):
+        """Install an addon from a manually selected folder.
+        
+        Args:
+            addon_path: str/Path - Path to addon folder
+            docs_path: Optional str/Path - Path to documentation folder
+            resources_path: Optional str/Path - Path to resources folder
+            expected_name: Optional str - Expected addon name for validation
+            selected_entrypoint: Optional str - Specific lua file name as entrypoint
+        
+        Returns:
+            dict - Installation result with keys:
+            - success: bool - whether installation succeeded
+            - message: str - success/error message
+            - requires_entrypoint_selection: bool - lua file selection needed
+            - lua_files: list - list of available lua files (if ambiguous)
+        """
         try:
             source_path = Path(addon_path)
             if not source_path.exists():
                 return {'success': False, 'error': 'Selected addon folder does not exist'}
 
             addon_info = self.detector.detect_addon_structure(source_path)
-            if not addon_info['found']:
+            
+            # Handle ambiguous addon name detection
+            if not addon_info['found'] and addon_info.get('ambiguous'):
+                if not selected_entrypoint:
+                    # Return lua files for user to select
+                    return {
+                        'success': False,
+                        'requires_entrypoint_selection': True,
+                        'lua_files': addon_info['lua_files'],
+                        'addon_path': str(source_path)
+                    }
+                else:
+                    # User has selected an entrypoint
+                    addon_info = {
+                        'found': True,
+                        'name': selected_entrypoint,
+                        'path': addon_info['path'],
+                        'structure': addon_info['structure']
+                    }
+            elif not addon_info['found']:
                 return {'success': False, 'error': 'Could not detect addon entry point in selected folder'}
 
             addon_name = addon_info['name']
@@ -877,6 +1081,19 @@ class PackageManager:
             return {'success': False, 'error': str(e)}
 
     def manual_install_plugin(self, dll_path, docs_path=None, resources_path=None, expected_name=None):
+        """Install a plugin from a manually selected DLL file.
+        
+        Args:
+            dll_path: str/Path - Path to plugin DLL file
+            docs_path: Optional str/Path - Path to documentation folder
+            resources_path: Optional str/Path - Path to resources folder
+            expected_name: Optional str - Expected plugin name for validation
+        
+        Returns:
+            dict - Installation result with keys:
+            - success: bool - whether installation succeeded
+            - message: str - success/error message
+        """
         try:
             plugin_file = Path(dll_path)
             if not plugin_file.exists() or plugin_file.suffix.lower() != '.dll':
@@ -931,12 +1148,18 @@ class PackageManager:
             return {'success': False, 'error': str(e)}
 
     def _check_file_conflicts(self, source_path, package_name, source_url=None):
-        """Check for file conflicts in libs/docs/resources folders. Returns dict with conflict info.
+        """Check for file conflicts in libs, docs, and resources folders.
         
         Args:
-            source_path: Path to the repository being installed
-            package_name: Name of the package being installed
-            source_url: URL of the repository (used to check if conflicts are from same repo)
+            source_path: str/Path - Source package directory
+            package_name: str - Target package name
+            source_url: Optional str - Source repository URL for same-repo skipping
+        
+        Returns:
+            dict - Conflict info with keys:
+            - libs: list - Conflicting library files
+            - docs: list - Conflicting documentation files
+            - resources: list - Conflicting resource files
         """
         source_path = Path(source_path)
         conflicts = {'libs': [], 'docs': False, 'resources': False}
@@ -986,6 +1209,17 @@ class PackageManager:
         return conflicts
     
     def _copy_extra_folders(self, source_path, package_name, pkg_type='addon', is_monorepo=False):
+        """Copy extra documentation and resource folders.
+        
+        Args:
+            source_path: str/Path - Source directory
+            package_name: str - Target package name
+            pkg_type: str - 'addon' or 'plugin'
+            is_monorepo: bool - Whether source is from monorepo
+        
+        Returns:
+            None
+        """
         source_path = Path(source_path)
         errors = []
         
@@ -1186,6 +1420,19 @@ class PackageManager:
         return errors
     
     def _get_latest_release_url(self, repo_url, preferred_asset_name=None):
+        """Fetch latest release asset download URL from repository.
+        
+        Args:
+            repo_url: str - Repository URL
+            preferred_asset_name: Optional str - Preferred asset filename to match
+        
+        Returns:
+            dict - Release info with keys:
+            - download_url: str - Asset download URL
+            - tag: str - Release tag
+            - rate_limited: bool - True if GitHub API rate limited
+            Or None if no release found
+        """
         try:
             parsed = urlparse(repo_url)
             path_parts = parsed.path.strip('/').split('/')
@@ -1260,6 +1507,14 @@ class PackageManager:
             return None
     
     def _get_release_tag(self, repo_url):
+        """Get the latest release tag for a repository.
+        
+        Args:
+            repo_url: str - Repository URL
+        
+        Returns:
+            str - Release tag name or None if no releases found
+        """
         try:
             parsed = urlparse(repo_url)
             path_parts = parsed.path.strip('/').split('/')
@@ -1290,6 +1545,14 @@ class PackageManager:
             return 'unknown'
 
     def _infer_asset_name(self, download_url):
+        """Extract asset filename from download URL.
+        
+        Args:
+            download_url: str - Full download URL
+        
+        Returns:
+            str - Asset filename or empty string on error
+        """
         try:
             parsed = urlparse(download_url)
             if not parsed.path:
@@ -1299,12 +1562,29 @@ class PackageManager:
             return None
 
     def _tokenize_asset_name(self, name):
+        """Split asset filename into tokenized parts.
+        
+        Args:
+            name: str - Asset filename
+        
+        Returns:
+            list - List of lowercase tokens/parts
+        """
         if not name:
             return []
         tokens = re.split(r'[^a-z0-9]+', name.lower())
         return [t for t in tokens if t and len(t) > 2 and not t.isdigit()]
 
     def _score_asset_match(self, candidate_name, tokens):
+        """Calculate matching score between asset name and tokens.
+        
+        Args:
+            candidate_name: str - Asset filename to test
+            tokens: list - Token list to match against
+        
+        Returns:
+            int - Matching score (higher is better)
+        """
         if not candidate_name or not tokens:
             return 0
         candidate_lower = candidate_name.lower()
@@ -1315,7 +1595,18 @@ class PackageManager:
         return score
 
     def _fetch_official_repo_catalog(self, branch=None):
-        """Fetch lists of official addons and plugins from the Ashita repo."""
+        """Fetch official addon and plugin lists from Ashita repository.
+        
+        Args:
+            branch: Optional str - Git branch to fetch from (defaults to configured branch)
+        
+        Returns:
+            dict - Catalog with keys:
+            - success: bool - Whether fetch succeeded
+            - addons: set - Set of official addon names
+            - plugins: set - Set of official plugin names
+            - error: str - Error message if failed
+        """
         result = {
             'addons': set(),
             'plugins': set(),
@@ -1379,8 +1670,215 @@ class PackageManager:
 
         return result
     
+    def _compare_with_remote_files(self, package_name, pkg_type, source_url, branch):
+        """Compare local package files with remote repository.
+        
+        Args:
+            package_name: str - Package name
+            pkg_type: str - 'addon' or 'plugin'
+            source_url: str - Remote repository URL
+            branch: str - Git branch to compare against
+        
+        Returns:
+            dict - Comparison result with keys:
+            - changed: bool - Whether files differ from remote
+            - error: str - Error message if comparison failed
+        """
+        try:
+            # Only compare with official repo
+            if source_url != self.official_repo:
+                return {'needs_update': True}
+            
+            # Create temporary directory for cloning
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                
+                if pkg_type == 'addon':
+                    # Clone only the specific addon folder (sparse checkout)
+                    repo_path = temp_path / 'repo'
+                    
+                    # Use sparse checkout for efficiency
+                    init_result = self._run_command(
+                        ['git', 'init'],
+                        cwd=temp_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    if init_result.returncode != 0:
+                        return {'needs_update': True}
+                    
+                    # Add remote
+                    self._run_command(
+                        ['git', 'remote', 'add', 'origin', source_url],
+                        cwd=temp_path,
+                        capture_output=True,
+                        timeout=10
+                    )
+                    
+                    # Enable sparse checkout
+                    self._run_command(
+                        ['git', 'config', 'core.sparseCheckout', 'true'],
+                        cwd=temp_path,
+                        capture_output=True,
+                        timeout=10
+                    )
+                    
+                    # Specify the path to checkout
+                    sparse_file = temp_path / '.git' / 'info' / 'sparse-checkout'
+                    sparse_file.parent.mkdir(parents=True, exist_ok=True)
+                    sparse_file.write_text(f'addons/{package_name}/*\n')
+                    
+                    # Pull the specific branch
+                    pull_result = self._run_command(
+                        ['git', 'pull', 'origin', branch, '--depth=1'],
+                        cwd=temp_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    if pull_result.returncode != 0:
+                        return {'needs_update': True}
+                    
+                    remote_addon_dir = temp_path / 'addons' / package_name
+                    local_addon_dir = self.addons_dir / package_name
+                    
+                    if not remote_addon_dir.exists() or not local_addon_dir.exists():
+                        return {'needs_update': True}
+                    
+                    # Compare files
+                    return self._compare_directories(local_addon_dir, remote_addon_dir)
+                    
+                else:  # plugin
+                    # Clone only the plugins folder
+                    repo_path = temp_path / 'repo'
+                    
+                    init_result = self._run_command(
+                        ['git', 'init'],
+                        cwd=temp_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    if init_result.returncode != 0:
+                        return {'needs_update': True}
+                    
+                    self._run_command(
+                        ['git', 'remote', 'add', 'origin', source_url],
+                        cwd=temp_path,
+                        capture_output=True,
+                        timeout=10
+                    )
+                    
+                    self._run_command(
+                        ['git', 'config', 'core.sparseCheckout', 'true'],
+                        cwd=temp_path,
+                        capture_output=True,
+                        timeout=10
+                    )
+                    
+                    sparse_file = temp_path / '.git' / 'info' / 'sparse-checkout'
+                    sparse_file.parent.mkdir(parents=True, exist_ok=True)
+                    sparse_file.write_text(f'plugins/{package_name}.dll\n')
+                    
+                    pull_result = self._run_command(
+                        ['git', 'pull', 'origin', branch, '--depth=1'],
+                        cwd=temp_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    if pull_result.returncode != 0:
+                        return {'needs_update': True}
+                    
+                    remote_dll = temp_path / 'plugins' / f'{package_name}.dll'
+                    local_dll = self.plugins_dir / f'{package_name}.dll'
+                    
+                    if not remote_dll.exists() or not local_dll.exists():
+                        return {'needs_update': True}
+                    
+                    # Compare file sizes and content
+                    if remote_dll.stat().st_size != local_dll.stat().st_size:
+                        return {'needs_update': True}
+                    
+                    # Binary comparison
+                    remote_hash = hashlib.md5(remote_dll.read_bytes()).hexdigest()
+                    local_hash = hashlib.md5(local_dll.read_bytes()).hexdigest()
+                    
+                    return {'needs_update': remote_hash != local_hash}
+                    
+        except Exception as e:
+            # On error, assume update is needed
+            return {'needs_update': True, 'error': str(e)}
+    
+    def _compare_directories(self, local_dir, remote_dir):
+        """Recursively compare two directories using MD5 hashing.
+        
+        Args:
+            local_dir: str/Path - Local directory path
+            remote_dir: str/Path - Remote directory path
+        
+        Returns:
+            bool - True if directories have same content, False if different
+        """
+        try:
+            # Get all files in both directories
+            local_files = set()
+            remote_files = set()
+            
+            for f in local_dir.rglob('*'):
+                if f.is_file():
+                    local_files.add(f.relative_to(local_dir))
+            
+            for f in remote_dir.rglob('*'):
+                if f.is_file():
+                    remote_files.add(f.relative_to(remote_dir))
+            
+            # Check if file lists differ
+            if local_files != remote_files:
+                return {'needs_update': True}
+            
+            # Compare file contents
+            for rel_path in local_files:
+                local_file = local_dir / rel_path
+                remote_file = remote_dir / rel_path
+                
+                # Quick size check
+                if local_file.stat().st_size != remote_file.stat().st_size:
+                    return {'needs_update': True}
+                
+                # Content comparison using hash
+                local_hash = hashlib.md5(local_file.read_bytes()).hexdigest()
+                remote_hash = hashlib.md5(remote_file.read_bytes()).hexdigest()
+                
+                if local_hash != remote_hash:
+                    return {'needs_update': True}
+            
+            # All files are identical
+            return {'needs_update': False}
+            
+        except Exception as e:
+            # On error, assume update is needed
+            return {'needs_update': True, 'error': str(e)}
+    
     def update_package(self, package_name, pkg_type, release_asset_url=None, release_asset_name=None, manual_payload=None):
-        """Update an existing package"""
+        """Update an existing package.
+        
+        Args:
+            package_name: str - Name of package to update
+            pkg_type: str - 'addon' or 'plugin'
+            release_asset_url: Optional str - Direct release asset download URL
+            release_asset_name: Optional str - Preferred release asset name
+            manual_payload: Optional dict - Payload for manual update (docs_path, resources_path, etc)
+        
+        Returns:
+            dict - Update result with keys:
+            - success: bool - whether update succeeded or already up-to-date
+            - message: str - result message
+            - already_updated: bool - True if no update needed
+            - requires_manual_update: bool - manual update required
+            - error: str - error message if failed
+        """
         try:
             package_info = self.package_tracker.get_package(package_name, pkg_type)
             
@@ -1392,6 +1890,7 @@ class PackageManager:
             current_commit = package_info.get('commit')
             branch = package_info.get('branch', self.official_repo_branch)
             old_package_info = package_info.copy()
+            is_pre_installed = install_method == 'pre-installed' or source_url == 'pre-installed'
 
             requires_manual = install_method == 'manual' or (
                 install_method == 'release' and (not source_url or source_url == 'unknown')
@@ -1410,15 +1909,34 @@ class PackageManager:
                 }
             
             # Handle pre-installed packages
-            if install_method == 'pre-installed' or source_url == 'pre-installed':
+            if is_pre_installed:
                 source_url = self.official_repo
-                install_method = 'git'
+                # Don't change install_method yet - we'll preserve it if no update needed
             
             if not source_url:
                 return {'success': False, 'error': 'Package source URL not found'}
             
-            # Check if package is already up-to-date
-            if install_method == 'git' and current_commit:
+            # For pre-installed packages, compare files with official repo
+            if is_pre_installed:
+                comparison_result = self._compare_with_remote_files(package_name, pkg_type, source_url, branch)
+                if not comparison_result.get('needs_update', True):
+                    # Files are identical, no update needed
+                    # Update commit hash if we can get it
+                    if source_url == self.official_repo:
+                        repo_path = f'addons/{package_name}' if pkg_type == 'addon' else f'plugins/{package_name}.dll'
+                        remote_result = self._get_remote_commit_hash(source_url, branch, repo_path)
+                        if remote_result and isinstance(remote_result, dict) and remote_result.get('sha'):
+                            package_info['commit'] = remote_result['sha']
+                            self.package_tracker.add_package(package_name, pkg_type, package_info)
+                    
+                    return {
+                        'success': True,
+                        'message': f'Package "{package_name}" is already up-to-date',
+                        'already_updated': True
+                    }
+            
+            # Check if package is already up-to-date (for git-installed packages)
+            if not is_pre_installed and install_method == 'git' and current_commit:
                 repo_path = None
                 if source_url == self.official_repo:
                     if pkg_type == 'addon':
@@ -1473,7 +1991,10 @@ class PackageManager:
                     shutil.move(str(target_dll), str(backup_path))
             
             try:
-                if install_method == 'git':
+                # Determine the install method for the update operation
+                update_install_method = 'git' if (is_pre_installed or install_method == 'git') else install_method
+                
+                if update_install_method == 'git':
                     branch = self.official_repo_branch if source_url == self.official_repo else None
                     result = self.install_from_git(source_url, pkg_type, target_package_name=package_name, branch=branch)
                     if isinstance(result, dict) and result.get('requires_variant_selection'):
@@ -1506,6 +2027,13 @@ class PackageManager:
                             self._remove_directory_safe(backup_path)
                         else:
                             backup_path.unlink()
+                    
+                    # If originally pre-installed, restore that status
+                    if is_pre_installed:
+                        updated_package_info = self.package_tracker.get_package(package_name, pkg_type)
+                        if updated_package_info:
+                            updated_package_info['install_method'] = 'pre-installed'
+                            self.package_tracker.add_package(package_name, pkg_type, updated_package_info)
                     
                     return {'success': True, 'message': f'Package "{package_name}" updated successfully'}
                 else:
@@ -1549,6 +2077,17 @@ class PackageManager:
             return {'success': False, 'error': str(e)}
 
     def _apply_manual_update(self, package_name, pkg_type, manual_payload, old_package_info):
+        """Apply manual update with documentation and resources.
+        
+        Args:
+            package_name: str - Package name to update
+            pkg_type: str - 'addon' or 'plugin'
+            manual_payload: dict - Update payload with paths
+            old_package_info: dict - Previous package info for rollback
+        
+        Returns:
+            dict - Update result with success/error status
+        """
         backup_path = None
         try:
             if pkg_type == 'addon':
@@ -1603,6 +2142,16 @@ class PackageManager:
             return {'success': False, 'error': str(e)}
 
     def _restore_manual_backup(self, package_name, pkg_type, backup_path):
+        """Restore package from backup after failed update.
+        
+        Args:
+            package_name: str - Package name to restore
+            pkg_type: str - 'addon' or 'plugin'
+            backup_path: str/Path - Path to backup directory
+        
+        Returns:
+            bool - True if restore successful, False otherwise
+        """
         if not backup_path:
             return
         backup = Path(backup_path)
@@ -1620,7 +2169,14 @@ class PackageManager:
             shutil.move(str(backup), str(target_dll))
     
     def _get_folder_commit_hash(self, folder_path):
-        """Get the last commit hash that affected a specific folder"""
+        """Get latest commit hash affecting a specific folder.
+        
+        Args:
+            folder_path: str/Path - Path to folder
+        
+        Returns:
+            str - Commit hash or None if not in git repository
+        """
         try:
             result = self._run_command(
                 ['git', 'log', '-1', '--format=%H', '--', str(folder_path)],
@@ -1636,6 +2192,16 @@ class PackageManager:
         return None
     
     def _get_remote_commit_hash(self, repo_url, branch, path=None):
+        """Get latest commit hash from remote repository branch.
+        
+        Args:
+            repo_url: str - Repository URL
+            branch: str - Git branch name
+            path: Optional str - Specific path to check (None for repo root)
+        
+        Returns:
+            str - Commit hash or None if retrieval failed
+        """
         max_retries = 5
         retry_delay = 2
         rate_limited = False
@@ -1693,7 +2259,17 @@ class PackageManager:
         return None
     
     def remove_package(self, package_name, pkg_type):
-        """Remove a package"""
+        """Remove an installed package.
+        
+        Args:
+            package_name: str - Name of package to remove
+            pkg_type: str - 'addon' or 'plugin'
+        
+        Returns:
+            dict - Removal result with keys:
+            - success: bool - whether removal succeeded
+            - message: str - success/error message
+        """
         try:
             package_info = self.package_tracker.get_package(package_name, pkg_type)
             
@@ -1805,7 +2381,15 @@ class PackageManager:
             return {'success': False, 'error': str(e)}
     
     def scan_existing_packages(self):
-        """Scan for existing addons and plugins on first launch"""
+        """Scan for existing addons and plugins on first launch.
+        
+        Returns:
+            dict - Scan result with keys:
+            - addons: int - number of addons found
+            - plugins: int - number of plugins found
+            - official_lookup: dict - official catalog lookup result
+            - release_flags: list - packages flagged as manual install
+        """
         addon_count = 0
         plugin_count = 0
 
@@ -1924,9 +2508,13 @@ class PackageManager:
         return result
     
     def detect_package_type(self, url):
-        """
-        Auto-detect if a repository contains an addon or plugin
-        Returns 'addon', 'plugin', or None if detection fails
+        """Auto-detect if a repository contains an addon or plugin.
+        
+        Args:
+            url: str - Git repository URL
+        
+        Returns:
+            str - 'addon', 'plugin', or None if detection fails
         """
         try:
             # Create temporary directory for cloning
@@ -1951,7 +2539,7 @@ class PackageManager:
                     return 'plugin'
                 
                 addon_info = self.detector.detect_addon_structure(repo_path)
-                if addon_info['found']:
+                if addon_info['found'] or addon_info.get('ambiguous'):
                     return 'addon'
                 
                 return None
@@ -1962,7 +2550,14 @@ class PackageManager:
             return None
 
     def detect_package_type_from_release(self, url):
-        """Attempt to determine package type by inspecting the latest release asset."""
+        """Determine package type by inspecting latest release asset.
+        
+        Args:
+            url: str - Repository URL
+        
+        Returns:
+            str - 'addon', 'plugin', or None if detection fails
+        """
         try:
             release_info = self._get_latest_release_url(url)
 
@@ -2005,7 +2600,7 @@ class PackageManager:
                     return 'plugin'
 
                 addon_info = self.detector.detect_addon_structure(extract_path)
-                if addon_info.get('found'):
+                if addon_info.get('found') or addon_info.get('ambiguous'):
                     return 'addon'
 
             return None
@@ -2013,9 +2608,13 @@ class PackageManager:
             return None
 
     def list_remote_branches(self, repo_url):
-        """List remote branches for a git repository URL using `git ls-remote --heads`.
-
-        Returns a list of branch names (strings) or an empty list on failure.
+        """List remote branches for a git repository.
+        
+        Args:
+            repo_url: str - Git repository URL
+        
+        Returns:
+            list - List of branch names (strings), or empty list on failure
         """
         try:
             result = self._run_command(

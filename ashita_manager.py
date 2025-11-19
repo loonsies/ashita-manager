@@ -31,13 +31,36 @@ from script_parser import ScriptParser
 
 
 class InstallWorker(QThread):
-    """Worker thread for package installation"""
+    """Thread worker for package git/release installation.
+    
+    Signals:
+        finished(success, message) - Installation complete
+        conflict_detected(result) - File conflicts found
+        variant_selection_requested(result) - Plugin variant selection needed
+        entrypoint_selection_requested(result) - Addon lua file selection needed
+        progress(message) - Installation progress update
+    """
     finished = pyqtSignal(bool, str)
     conflict_detected = pyqtSignal(dict)
     variant_selection_requested = pyqtSignal(dict)
+    entrypoint_selection_requested = pyqtSignal(dict)
     progress = pyqtSignal(str)
     
-    def __init__(self, package_manager, url, pkg_type, install_method, branch=None, force=False, plugin_variant=None, release_asset_url=None, release_asset_name=None):
+    def __init__(self, package_manager, url, pkg_type, install_method, branch=None, force=False, plugin_variant=None, release_asset_url=None, release_asset_name=None, selected_entrypoint=None):
+        """Initialize installation worker.
+        
+        Args:
+            package_manager: PackageManager - Package manager instance
+            url: str - Repository URL
+            pkg_type: str - 'addon' or 'plugin'
+            install_method: str - 'Clone' or 'Release'
+            branch: Optional str - Git branch for clone method
+            force: bool - Skip conflict checking
+            plugin_variant: Optional str - Specific plugin variant
+            release_asset_url: Optional str - Specific release asset URL
+            release_asset_name: Optional str - Specific release asset name
+            selected_entrypoint: Optional str - Addon lua file entrypoint
+        """
         super().__init__()
         self.package_manager = package_manager
         self.url = url
@@ -48,12 +71,25 @@ class InstallWorker(QThread):
         self.plugin_variant = plugin_variant
         self.release_asset_url = release_asset_url
         self.release_asset_name = release_asset_name
+        self.selected_entrypoint = selected_entrypoint
     
     def run(self):
+        """Execute installation based on method type.
+        
+        Emits appropriate signals: finished, conflict_detected,
+        variant_selection_requested, or entrypoint_selection_requested
+        """
         try:
             if self.install_method == "Clone":
                 self.progress.emit(f"Cloning repository from {self.url}...")
-                result = self.package_manager.install_from_git(self.url, self.pkg_type, branch=self.branch, force=self.force, plugin_variant=self.plugin_variant)
+                result = self.package_manager.install_from_git(
+                    self.url, 
+                    self.pkg_type, 
+                    branch=self.branch, 
+                    force=self.force, 
+                    plugin_variant=self.plugin_variant,
+                    selected_entrypoint=self.selected_entrypoint
+                )
             else:  # Release
                 self.progress.emit(f"Downloading release from {self.url}...")
                 result = self.package_manager.install_from_release(
@@ -62,7 +98,8 @@ class InstallWorker(QThread):
                     force=self.force,
                     plugin_variant=self.plugin_variant,
                     asset_download_url=self.release_asset_url,
-                    asset_name=self.release_asset_name
+                    asset_name=self.release_asset_name,
+                    selected_entrypoint=self.selected_entrypoint
                 )
             
             if result['success']:
@@ -70,8 +107,9 @@ class InstallWorker(QThread):
             elif result.get('requires_confirmation'):
                 self.conflict_detected.emit(result)
             elif result.get('requires_variant_selection'):
-                # Inform UI to prompt user for variant selection
                 self.variant_selection_requested.emit(result)
+            elif result.get('requires_entrypoint_selection'):
+                self.entrypoint_selection_requested.emit(result)
             else:
                 self.finished.emit(False, result['error'])
         except Exception as e:
@@ -80,14 +118,25 @@ class InstallWorker(QThread):
 
 class ManualInstallWorker(QThread):
     finished = pyqtSignal(bool, str)
+    entrypoint_selection_requested = pyqtSignal(dict)
     progress = pyqtSignal(str)
 
     def __init__(self, package_manager, payload):
+        """Initialize manual installation worker.
+        
+        Args:
+            package_manager: PackageManager - Package manager instance
+            payload: dict - Installation payload with addon_path, dll_path, etc
+        """
         super().__init__()
         self.package_manager = package_manager
         self.payload = payload
 
     def run(self):
+        """Execute manual installation from provided payload.
+        
+        Emits: finished(success, message) or entrypoint_selection_requested(result)
+        """
         try:
             pkg_type = self.payload.get('pkg_type')
             if pkg_type == 'addon':
@@ -95,7 +144,8 @@ class ManualInstallWorker(QThread):
                 result = self.package_manager.manual_install_addon(
                     self.payload.get('addon_path'),
                     docs_path=self.payload.get('docs_path'),
-                    resources_path=self.payload.get('resources_path')
+                    resources_path=self.payload.get('resources_path'),
+                    selected_entrypoint=self.payload.get('selected_entrypoint')
                 )
             else:
                 self.progress.emit("Copying plugin files...")
@@ -107,6 +157,8 @@ class ManualInstallWorker(QThread):
 
             if result.get('success'):
                 self.finished.emit(True, result.get('message', 'Manual installation completed'))
+            elif result.get('requires_entrypoint_selection'):
+                self.entrypoint_selection_requested.emit(result)
             else:
                 self.finished.emit(False, result.get('error', 'Manual installation failed'))
         except Exception as e:
@@ -118,9 +170,20 @@ class UpdateWorker(QThread):
     finished = pyqtSignal(bool, str, bool)
     progress = pyqtSignal(str)
     variant_selection_requested = pyqtSignal(dict)
+    entrypoint_selection_requested = pyqtSignal(dict)
     manual_update_requested = pyqtSignal(dict)
     
     def __init__(self, package_manager, package_name, pkg_type, release_asset_url=None, release_asset_name=None, manual_payload=None):
+        """Initialize update worker.
+        
+        Args:
+            package_manager: PackageManager - Package manager instance
+            package_name: str - Package to update
+            pkg_type: str - 'addon' or 'plugin'
+            release_asset_url: Optional str - Specific release asset URL
+            release_asset_name: Optional str - Specific release asset name
+            manual_payload: Optional dict - Manual update payload
+        """
         super().__init__()
         self.package_manager = package_manager
         self.package_name = package_name
@@ -130,6 +193,10 @@ class UpdateWorker(QThread):
         self.manual_payload = manual_payload
     
     def run(self):
+        """Execute package update operation.
+        
+        Emits: finished(success, message, already_updated) or variant/manual selection signals
+        """
         try:
             self.progress.emit(f"Updating {self.package_name}...")
             result = self.package_manager.update_package(
@@ -141,6 +208,9 @@ class UpdateWorker(QThread):
             )
             if result.get('requires_variant_selection'):
                 self.variant_selection_requested.emit(result)
+                return
+            if result.get('requires_entrypoint_selection'):
+                self.entrypoint_selection_requested.emit(result)
                 return
             if result.get('requires_manual_update'):
                 self.manual_update_requested.emit(result)
@@ -162,6 +232,13 @@ class BatchUpdateWorker(QThread):
     log = pyqtSignal(str)
     
     def __init__(self, package_manager, package_list, pkg_type):
+        """Initialize batch update worker.
+        
+        Args:
+            package_manager: PackageManager - Package manager instance
+            package_list: list - List of package names to update
+            pkg_type: str - 'addon' or 'plugin'
+        """
         super().__init__()
         self.package_manager = package_manager
         self.package_list = package_list
@@ -169,10 +246,14 @@ class BatchUpdateWorker(QThread):
         self._is_cancelled = False
     
     def cancel(self):
-        """Request cancellation of the batch update"""
+        """Request cancellation of batch update process."""
         self._is_cancelled = True
     
     def run(self):
+        """Execute batch update for multiple packages.
+        
+        Emits: progress(message), finished(updated, failed)
+        """
         updated = 0
         failed = 0
         skipped = 0
@@ -213,10 +294,19 @@ class ScanWorker(QThread):
     progress = pyqtSignal(str)
     
     def __init__(self, package_manager):
+        """Initialize scan worker.
+        
+        Args:
+            package_manager: PackageManager - Package manager instance
+        """
         super().__init__()
         self.package_manager = package_manager
     
     def run(self):
+        """Scan existing addons and plugins.
+        
+        Emits: finished(results)
+        """
         try:
             self.progress.emit("Scanning for existing packages...")
             results = self.package_manager.scan_existing_packages()
@@ -227,6 +317,14 @@ class ScanWorker(QThread):
 
 class ManualPackageDialog(QDialog):
     def __init__(self, parent=None, mode='install', pkg_type=None, package_name=None):
+        """Initialize manual installation dialog.
+        
+        Args:
+            parent: Optional QWidget - Parent window
+            mode: str - 'install' or 'update'
+            pkg_type: Optional str - 'addon' or 'plugin' (auto-selected if not specified)
+            package_name: Optional str - Package name for update mode
+        """
         super().__init__(parent)
         self.mode = mode
         self.package_name = package_name
@@ -271,6 +369,11 @@ class ManualPackageDialog(QDialog):
         layout.addWidget(self.button_box)
 
     def _build_addon_form(self):
+        """Build addon installation form with path selections.
+        
+        Returns:
+            QWidget - Form widget with addon path inputs
+        """
         widget = QWidget()
         form = QFormLayout(widget)
 
@@ -301,6 +404,11 @@ class ManualPackageDialog(QDialog):
         return widget
 
     def _build_plugin_form(self):
+        """Build plugin installation form with DLL selection.
+        
+        Returns:
+            QWidget - Form widget with plugin DLL input
+        """
         widget = QWidget()
         form = QFormLayout(widget)
 
@@ -331,24 +439,45 @@ class ManualPackageDialog(QDialog):
         return widget
 
     def _browse_folder(self, line_edit, caption):
+        """Open folder browser dialog and update line edit.
+        
+        Args:
+            line_edit: QLineEdit - Text field to update with selection
+            caption: str - Dialog title
+        """
         folder = QFileDialog.getExistingDirectory(self, caption, os.path.expanduser("~"))
         if folder:
             line_edit.setText(folder)
 
     def _browse_dll(self):
+        """Open file browser for DLL selection.
+        
+        Updates dll_path field with selected file.
+        """
         file_path, _ = QFileDialog.getOpenFileName(self, "Select plugin DLL", os.path.expanduser("~"), "DLL Files (*.dll)")
         if file_path:
             self.plugin_dll_input.setText(file_path)
 
     def _selected_pkg_type(self):
+        """Get currently selected package type.
+        
+        Returns:
+            str - 'addon' or 'plugin'
+        """
         return 'addon' if self.type_selector.currentIndex() == 0 else 'plugin'
 
     def _handle_accept(self):
+        """Handle accept button - validate and close dialog."""
         if not self._validate_inputs():
             return
         self.accept()
 
     def _validate_inputs(self):
+        """Validate user inputs for addon or plugin installation.
+        
+        Returns:
+            bool - True if all inputs are valid, False otherwise
+        """
         pkg_type = self._selected_pkg_type()
         if pkg_type == 'addon':
             path = self.addon_path_input.text().strip()
@@ -369,9 +498,19 @@ class ManualPackageDialog(QDialog):
         return True
 
     def _show_error(self, message):
+        """Show error dialog with validation message.
+        
+        Args:
+            message: str - Error message to display
+        """
         QMessageBox.warning(self, "Invalid input", message)
 
     def get_payload(self):
+        """Get installation payload from form inputs.
+        
+        Returns:
+            dict - Payload with pkg_type, addon_path, dll_path, docs_path, resources_path
+        """
         pkg_type = self._selected_pkg_type()
         if pkg_type == 'addon':
             return {
@@ -388,12 +527,27 @@ class ManualPackageDialog(QDialog):
         }
 
     def _optional_path(self, value):
+        """Convert path value to string or None if empty.
+        
+        Args:
+            value: str or Path - Path value to normalize
+        
+        Returns:
+            str or None - Path string or None if empty
+        """
         value = (value or '').strip()
         return value or None
 
 class SettingsDialog(QDialog):
     
     def __init__(self, package_tracker, ashita_path, parent=None):
+        """Initialize settings dialog.
+        
+        Args:
+            package_tracker: PackageTracker - Package tracker instance
+            ashita_path: str - Current Ashita installation path
+            parent: Optional QWidget - Parent window
+        """
         super().__init__(parent)
         self.package_tracker = package_tracker
         self.current_ashita_path = ashita_path
@@ -462,6 +616,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(button_box)
     
     def toggle_token_visibility(self):
+        """Toggle GitHub token visibility between password and plain text."""
         if self.token_input.echoMode() == QLineEdit.EchoMode.Password:
             self.token_input.setEchoMode(QLineEdit.EchoMode.Normal)
             self.show_token_btn.setText("Hide")
@@ -470,6 +625,7 @@ class SettingsDialog(QDialog):
             self.show_token_btn.setText("Show")
     
     def browse_ashita_path(self):
+        """Open folder browser to select Ashita installation path."""
         folder = QFileDialog.getExistingDirectory(
             self,
             "Select Ashita Installation Folder",
@@ -479,6 +635,11 @@ class SettingsDialog(QDialog):
             self.path_input.setText(folder)
     
     def save_settings(self):
+        """Save settings to package tracker.
+        
+        Returns:
+            bool - True if save successful, False if validation failed
+        """
         ashita_path = self.path_input.text().strip()
         path_changed = False
         
@@ -539,6 +700,7 @@ class SettingsDialog(QDialog):
 
 class AshitaManagerUI(QMainWindow):
     def __init__(self):
+        """Initialize Ashita Package Manager application."""
         super().__init__()
         
         # base directory based on whether frozen (bundled) or not
@@ -622,6 +784,11 @@ class AshitaManagerUI(QMainWindow):
         self.refresh_script_list()
     
     def _prompt_for_ashita_path(self):
+        """Prompt user to select Ashita installation path.
+        
+        Returns:
+            str - Selected path or None if cancelled
+        """
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Icon.Information)
         msg.setText("Welcome to Ashita Package Manager!")
@@ -1176,6 +1343,11 @@ class AshitaManagerUI(QMainWindow):
             self.statusBar().showMessage('Waiting for initialization...')
 
     def showEvent(self, event):
+        """Handle window show event - center window on screen.
+        
+        Args:
+            event: QShowEvent - Show event object
+        """
         super().showEvent(event)
         try:
             if not getattr(self, '_centered', False):
@@ -1190,6 +1362,12 @@ class AshitaManagerUI(QMainWindow):
             pass
 
     def _center_widget(self, widget, parent=None):
+        """Center a widget on screen or within parent.
+        
+        Args:
+            widget: QWidget - Widget to center
+            parent: Optional QWidget - Parent widget for relative positioning
+        """
         try:
             parent = parent or self
             if parent and getattr(parent, 'isVisible', lambda: False)():
@@ -1209,6 +1387,18 @@ class AshitaManagerUI(QMainWindow):
             pass
 
     def _show_centered_message(self, icon, title, text, informative=None, buttons=QMessageBox.StandardButton.Ok):
+        """Show centered message dialog.
+        
+        Args:
+            icon: QMessageBox.Icon - Message box icon type
+            title: str - Dialog title
+            text: str - Main message text
+            informative: Optional str - Informative text
+            buttons: QMessageBox buttons - Buttons to show
+        
+        Returns:
+            int - Button clicked
+        """
         try:
             msg = QMessageBox(self)
             msg.setIcon(icon)
@@ -1240,6 +1430,17 @@ class AshitaManagerUI(QMainWindow):
 
 
     def _create_progress(self, label, cancel_text, minimum, maximum):
+        """Create and show progress dialog.
+        
+        Args:
+            label: str - Progress label text
+            cancel_text: str - Cancel button text
+            minimum: int - Minimum progress value
+            maximum: int - Maximum progress value
+        
+        Returns:
+            QProgressDialog - Progress dialog widget
+        """
         dlg = QProgressDialog(label, cancel_text, minimum, maximum, self)
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
         dlg.setWindowTitle(label)
@@ -1253,6 +1454,14 @@ class AshitaManagerUI(QMainWindow):
         return dlg
 
     def _std_icon(self, key):
+        """Get standard icon by key name.
+        
+        Args:
+            key: str - Icon key ('info', 'warning', 'error', 'question')
+        
+        Returns:
+            QIcon - Standard icon or default if key not found
+        """
         mapping = {
             'install': 'SP_DialogOpenButton',
             'add': 'SP_FileDialogNewFolder',
@@ -1284,6 +1493,7 @@ class AshitaManagerUI(QMainWindow):
         return QApplication.style().standardIcon(sp)
     
     def perform_initial_scan(self):
+        """Start initial package scan on first application launch."""
         self.log("First launch detected")
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Icon.Information)
@@ -1306,6 +1516,11 @@ class AshitaManagerUI(QMainWindow):
             self.scan_worker.start()
     
     def scan_finished(self, results):
+        """Handle completion of package scan.
+        
+        Args:
+            results: dict - Scan results with addon/plugin counts
+        """
         self.scan_progress.close()
 
         official_lookup = results.get('official_lookup')
@@ -1335,6 +1550,10 @@ class AshitaManagerUI(QMainWindow):
             self.refresh_package_lists()
     
     def install_package(self):
+        """Install package from URL input.
+        
+        Validates URL and starts installation worker thread.
+        """
         url = self.url_input.text().strip()
         if not url:
             self._show_centered_message(QMessageBox.Icon.Warning, "Error", "Please enter a Git URL")
@@ -1413,20 +1632,33 @@ class AshitaManagerUI(QMainWindow):
             branch=branch,
             plugin_variant=None,
             release_asset_url=self._last_install_params.get('release_asset_url'),
-            release_asset_name=self._last_install_params.get('release_asset_name')
+            release_asset_name=self._last_install_params.get('release_asset_name'),
+            selected_entrypoint=None
         )
         self.worker.progress.connect(self.update_progress)
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.install_finished)
         self.worker.conflict_detected.connect(self.handle_install_conflict)
         self.worker.variant_selection_requested.connect(self.handle_variant_selection)
+        self.worker.entrypoint_selection_requested.connect(self.handle_entrypoint_selection)
         self.worker.start()
     
     def update_progress(self, message):
+        """Update progress dialog label text.
+        
+        Args:
+            message: str - Progress message
+        """
         self.progress.setLabelText(message)
         QApplication.processEvents()
     
     def install_finished(self, success, message):
+        """Handle installation completion.
+        
+        Args:
+            success: bool - Whether installation succeeded
+            message: str - Result message
+        """
         self.progress.close()
         
         if success:
@@ -1439,6 +1671,7 @@ class AshitaManagerUI(QMainWindow):
             self._show_centered_message(QMessageBox.Icon.Critical, "Error", f"Installation failed:\n{message}")
 
     def open_manual_install_dialog(self):
+        """Open manual package installation dialog."""
         dialog = ManualPackageDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -1455,6 +1688,12 @@ class AshitaManagerUI(QMainWindow):
         self.manual_install_worker.start()
 
     def manual_install_finished(self, success, message):
+        """Handle completion of manual installation.
+        
+        Args:
+            success: bool - Whether installation succeeded
+            message: str - Result message
+        """
         try:
             self.progress.close()
         except Exception:
@@ -1468,7 +1707,11 @@ class AshitaManagerUI(QMainWindow):
             self._show_centered_message(QMessageBox.Icon.Warning, "Manual install failed", message)
     
     def handle_install_conflict(self, result):
-        """Handle file conflicts detected during installation"""
+        """Handle file conflict detection during installation.
+        
+        Args:
+            result: dict - Installation result with conflicts info
+        """
         self.progress.close()
         
         is_monorepo = result.get('monorepo', False)
@@ -1562,7 +1805,10 @@ class AshitaManagerUI(QMainWindow):
             self.log("Installation cancelled by user")
     
     def _retry_install_with_force(self):
-        """Retry the last installation attempt with force=True to skip conflict checks"""
+        """Retry failed installation by overriding conflict checks.
+        
+        Uses cached result to restart installation with force flag.
+        """
         if not hasattr(self, '_last_install_params'):
             self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Installation parameters not found")
             return
@@ -1587,17 +1833,23 @@ class AshitaManagerUI(QMainWindow):
             force=True,
             plugin_variant=None,
             release_asset_url=release_asset_url,
-            release_asset_name=self._last_install_params.get('release_asset_name')
+            release_asset_name=self._last_install_params.get('release_asset_name'),
+            selected_entrypoint=None
         )
         self.worker.progress.connect(self.update_progress)
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.install_finished)
         self.worker.conflict_detected.connect(self.handle_install_conflict)  # In case nested conflicts occur
         self.worker.variant_selection_requested.connect(self.handle_variant_selection)
+        self.worker.entrypoint_selection_requested.connect(self.handle_entrypoint_selection)
         self.worker.start()
 
     def handle_variant_selection(self, result):
-        """Prompt the user to select a plugin variant when backend requests it."""
+        """Handle plugin variant selection request.
+        
+        Args:
+            result: dict - Installation result with available variants
+        """
         try:
             self.progress.close()
         except Exception:
@@ -1626,7 +1878,114 @@ class AshitaManagerUI(QMainWindow):
 
         self._retry_install_with_variant(choice, is_release_asset=is_release_asset, asset_url=asset_url)
 
+    def handle_entrypoint_selection(self, result):
+        """Handle addon lua file entrypoint selection.
+        
+        Args:
+            result: dict - Installation result with available lua files
+        """
+        try:
+            self.progress.close()
+        except Exception:
+            pass
+
+        lua_files = result.get('lua_files', [])
+        if not lua_files:
+            self._show_centered_message(QMessageBox.Icon.Critical, "Error", "No lua files found")
+            return
+        
+        # Store result data for retry
+        self._pending_entrypoint_result = result
+        
+        choice, ok = QInputDialog.getItem(
+            self, 
+            "Select Addon Entrypoint", 
+            "Multiple lua files found. Select the main addon file:", 
+            lua_files, 
+            0, 
+            False
+        )
+        if not ok:
+            self.log("Entrypoint selection cancelled by user")
+            return
+
+        # Retry installation with selected entrypoint
+        self._retry_with_entrypoint(choice, result)
+
+    def _retry_with_entrypoint(self, entrypoint_name, result):
+        """Retry installation with selected lua entrypoint.
+        
+        Args:
+            entrypoint_name: str - Selected lua filename
+            result: dict - Original installation result
+        """
+        # Check if this is a manual install
+        addon_path = result.get('addon_path')
+        if addon_path:
+            # Manual installation
+            payload = {
+                'pkg_type': 'addon',
+                'addon_path': addon_path,
+                'selected_entrypoint': entrypoint_name
+            }
+            
+            self.log(f"Retrying manual install with entrypoint: {entrypoint_name}")
+            self.progress = self._create_progress("Installing package...", None, 0, 0)
+            self.manual_install_worker = ManualInstallWorker(self.package_manager, payload)
+            self.manual_install_worker.progress.connect(self.update_progress)
+            self.manual_install_worker.progress.connect(self.log)
+            self.manual_install_worker.finished.connect(self.manual_install_finished)
+            self.manual_install_worker.entrypoint_selection_requested.connect(self.handle_entrypoint_selection)
+            self.manual_install_worker.start()
+        else:
+            # Git or release installation
+            if not hasattr(self, '_last_install_params'):
+                self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Installation parameters not found")
+                return
+
+            params = self._last_install_params
+            params['selected_entrypoint'] = entrypoint_name
+            
+            url = params['url']
+            pkg_type = params['pkg_type']
+            install_method = params['install_method']
+            branch = params.get('branch')
+            release_asset_url = params.get('release_asset_url')
+            release_asset_name = params.get('release_asset_name')
+            
+            self.log(f"Retrying installation with entrypoint: {entrypoint_name}")
+            self.progress = QProgressDialog("Installing package...", None, 0, 0, self)
+            self.progress.setWindowModality(Qt.WindowModality.WindowModal)
+            self.progress.show()
+
+            self.worker = InstallWorker(
+                self.package_manager,
+                url,
+                pkg_type,
+                install_method,
+                branch=branch,
+                force=False,
+                plugin_variant=None,
+                release_asset_url=release_asset_url,
+                release_asset_name=release_asset_name,
+                selected_entrypoint=entrypoint_name
+            )
+            self.worker.progress.connect(self.update_progress)
+            self.worker.progress.connect(self.log)
+            self.worker.finished.connect(self.install_finished)
+            self.worker.conflict_detected.connect(self.handle_install_conflict)
+            self.worker.variant_selection_requested.connect(self.handle_variant_selection)
+            self.worker.entrypoint_selection_requested.connect(self.handle_entrypoint_selection)
+            self.worker.start()
+
     def _retry_install_with_variant(self, variant_name, is_release_asset=False, asset_url=None):
+        """Retry installation with selected plugin variant.
+        
+        Args:
+            variant_name: str - Selected variant name
+            is_release_asset: bool - Whether variant is from release
+            asset_url: Optional str - Specific asset URL for variant
+        """
         if not hasattr(self, '_last_install_params'):
             self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Installation parameters not found")
             return
@@ -1661,16 +2020,19 @@ class AshitaManagerUI(QMainWindow):
             force=False,
             plugin_variant=plugin_variant,
             release_asset_url=release_asset_url,
-            release_asset_name=self._last_install_params.get('release_asset_name')
+            release_asset_name=self._last_install_params.get('release_asset_name'),
+            selected_entrypoint=None
         )
         self.worker.progress.connect(self.update_progress)
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.install_finished)
         self.worker.conflict_detected.connect(self.handle_install_conflict)
         self.worker.variant_selection_requested.connect(self.handle_variant_selection)
+        self.worker.entrypoint_selection_requested.connect(self.handle_entrypoint_selection)
         self.worker.start()
     
     def refresh_package_lists(self):
+        """Refresh package list displays for addons and plugins."""
         packages = self.package_tracker.get_all_packages()
         
         self.addons_list.clear()
@@ -1687,6 +2049,16 @@ class AshitaManagerUI(QMainWindow):
             self.populate_script_ui()
     
     def _populate_package_list(self, tree_widget, packages, pkg_type):
+        """Populate tree widget with packages from tracker.
+        
+        Args:
+            tree_widget: QTreeWidget - Widget to populate
+            packages: dict - Packages dict from tracker
+            pkg_type: str - 'addon' or 'plugin'
+        
+        Returns:
+            int - Number of packages added
+        """
         categories = {
             'pre-installed': [],
             'git': [],
@@ -1738,6 +2110,11 @@ class AshitaManagerUI(QMainWindow):
         return total_count
     
     def filter_packages(self, pkg_type):
+        """Filter installed packages list by type.
+        
+        Args:
+            pkg_type: str - 'addon' or 'plugin'
+        """
         tree_widget = self.addons_list if pkg_type == 'addon' else self.plugins_list
         search_text = (self.addons_search.text() if pkg_type == 'addon' else self.plugins_search.text()).lower()
 
@@ -1762,7 +2139,11 @@ class AshitaManagerUI(QMainWindow):
             category_item.setHidden(not category_has_visible and bool(search_text))
     
     def filter_script_list(self, pkg_type):
-        """Filter active plugins/addons in script by search text"""
+        """Filter script packages by search text.
+        
+        Args:
+            pkg_type: str - 'addon' or 'plugin'
+        """
         tree_widget = self.script_addons_list if pkg_type == 'addon' else self.script_plugins_list
         search_text = (self.script_addons_search.text() if pkg_type == 'addon' else self.script_plugins_search.text()).lower()
 
@@ -1786,7 +2167,11 @@ class AshitaManagerUI(QMainWindow):
             category_item.setHidden(not category_has_visible and bool(search_text))
     
     def filter_available_list(self, pkg_type):
-        """Filter available plugins/addons by search text"""
+        """Filter available packages by search text.
+        
+        Args:
+            pkg_type: str - 'addon' or 'plugin'
+        """
         tree_widget = self.available_addons_list if pkg_type == 'addon' else self.available_plugins_list
         search_text = (self.available_addons_search.text() if pkg_type == 'addon' else self.available_plugins_search.text()).lower()
 
@@ -1811,6 +2196,11 @@ class AshitaManagerUI(QMainWindow):
             category_item.setHidden(not category_has_visible and bool(search_text))
     
     def show_package_info(self, item):
+        """Display detailed package information in info panel.
+        
+        Args:
+            item: QTreeWidgetItem - Selected package item
+        """
         data = item.data(0, Qt.ItemDataRole.UserRole)
         
         if data.get('is_category'):
@@ -1843,6 +2233,11 @@ class AshitaManagerUI(QMainWindow):
     
     
     def update_package(self, pkg_type):
+        """Update selected installed package.
+        
+        Args:
+            pkg_type: str - 'addon' or 'plugin'
+        """
         tree_widget = self.addons_list if pkg_type == "addon" else self.plugins_list
         selected_items = tree_widget.selectedItems()
         
@@ -1892,6 +2287,13 @@ class AshitaManagerUI(QMainWindow):
             self.batch_worker.start()
     
     def update_finished(self, success, message, already_updated=False):
+        """Handle package update completion.
+        
+        Args:
+            success: bool - Whether update succeeded
+            message: str - Result message
+            already_updated: bool - Whether package was already up-to-date
+        """
         try:
             self.progress.close()
         except Exception:
@@ -1910,6 +2312,11 @@ class AshitaManagerUI(QMainWindow):
             self._show_centered_message(QMessageBox.Icon.Warning, "Update failed", message)
 
     def handle_update_variant_selection(self, result):
+        """Handle plugin variant selection for update.
+        
+        Args:
+            result: dict - Update result with available variants
+        """
         try:
             self.progress.close()
         except Exception:
@@ -1960,6 +2367,10 @@ class AshitaManagerUI(QMainWindow):
         self._retry_update_with_variant()
 
     def _retry_update_with_variant(self):
+        """Retry package update with selected plugin variant.
+        
+        Uses cached update parameters to restart with chosen variant.
+        """
         if not self._last_update_params:
             self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Update parameters not found.")
             return
@@ -1991,6 +2402,11 @@ class AshitaManagerUI(QMainWindow):
         self.update_worker.start()
 
     def handle_manual_update_request(self, result):
+        """Handle manual update requirement during package update.
+        
+        Args:
+            result: dict - Update result indicating manual update needed
+        """
         try:
             self.progress.close()
         except Exception:
@@ -2032,6 +2448,10 @@ class AshitaManagerUI(QMainWindow):
         self._retry_update_with_manual()
 
     def _retry_update_with_manual(self):
+        """Retry package update using manual file selection.
+        
+        Opens manual update dialog to collect user file selections.
+        """
         if not self._last_update_params:
             self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Update parameters not found.")
             return
@@ -2060,6 +2480,11 @@ class AshitaManagerUI(QMainWindow):
         self.update_worker.start()
 
     def batch_update(self, pkg_type):
+        """Update multiple packages at once.
+        
+        Args:
+            pkg_type: str - 'addon' or 'plugin'
+        """
         packages = self.package_tracker.get_all_packages()
         type_key = f"{pkg_type}s"
         package_list = packages.get(type_key, {})
@@ -2092,11 +2517,25 @@ class AshitaManagerUI(QMainWindow):
             self.batch_worker.start()
     
     def batch_update_progress(self, message, current, total):
+        """Update batch update progress display.
+        
+        Args:
+            message: str - Progress message
+            current: int - Current package number
+            total: int - Total packages
+        """
         self.batch_progress.setLabelText(message)
         self.batch_progress.setValue(current)
         QApplication.processEvents()
     
     def batch_update_finished(self, updated, failed, skipped):
+        """Handle batch update completion.
+        
+        Args:
+            updated: int - Number of successfully updated packages
+            failed: int - Number of failed updates
+            skipped: int - Number of skipped packages
+        """
         self.batch_progress.close()
         self.refresh_package_lists()
         
@@ -2105,6 +2544,11 @@ class AshitaManagerUI(QMainWindow):
         self._show_centered_message(QMessageBox.Icon.Information, "Batch update complete", summary)
     
     def remove_package(self, pkg_type):
+        """Remove selected package from installation.
+        
+        Args:
+            pkg_type: str - 'addon' or 'plugin'
+        """
         tree_widget = self.addons_list if pkg_type == "addon" else self.plugins_list
         selected_items = tree_widget.selectedItems()
         
@@ -2280,6 +2724,7 @@ class AshitaManagerUI(QMainWindow):
         self._show_centered_message(QMessageBox.Icon.Warning, "Error", "Please select a package, not a category")
     
     def refresh_script_list(self):
+        """Refresh script selector with available scripts."""
         scripts_dir = os.path.join(self.ashita_root, 'scripts')
         
         if not os.path.exists(scripts_dir):
@@ -2298,6 +2743,11 @@ class AshitaManagerUI(QMainWindow):
             self.script_selector.setCurrentIndex(0)
     
     def load_selected_script(self, filename):
+        """Load selected script file for editing.
+        
+        Args:
+            filename: str - Script filename to load
+        """
         if not filename:
             return
         
@@ -2318,6 +2768,7 @@ class AshitaManagerUI(QMainWindow):
             self.log(f"Failed to parse script: {filename}")
     
     def populate_script_ui(self):
+        """Populate script editor UI with current script data."""
         if not self.current_script:
             return
         
@@ -2517,6 +2968,11 @@ class AshitaManagerUI(QMainWindow):
         self.script_config_list.blockSignals(False)
     
     def on_tab_changed(self, index):
+        """Handle tab change events.
+        
+        Args:
+            index: int - Selected tab index
+        """
         # Hide info panel when on Scripts tab (index 2)
         if index == 2:
             self.info_group.setVisible(False)
@@ -2661,6 +3117,7 @@ class AshitaManagerUI(QMainWindow):
         tree_widget.blockSignals(False)
     
     def add_exec_command(self):
+        """Add new exec command to script."""
         from PyQt6.QtWidgets import QInputDialog
         
         # Prompt for command type
@@ -2692,6 +3149,7 @@ class AshitaManagerUI(QMainWindow):
                 self.populate_script_ui()
     
     def remove_exec_command(self):
+        """Remove selected exec command from script."""
         current = self.script_exec_list.currentItem()
         if not current:
             self._show_centered_message(QMessageBox.Icon.Warning, "No selection", "Please select an exec command to remove")
@@ -2709,6 +3167,7 @@ class AshitaManagerUI(QMainWindow):
         self.populate_script_ui()
     
     def add_config_command(self):
+        """Add new config command to script."""
         from PyQt6.QtWidgets import QInputDialog
         
         text, ok = QInputDialog.getText(self, "Add Config Command", "Enter command (e.g., /fps 1):")
@@ -2723,6 +3182,7 @@ class AshitaManagerUI(QMainWindow):
             self.populate_script_ui()
     
     def remove_config_command(self):
+        """Remove selected config command from script."""
         current = self.script_config_list.currentItem()
         if not current:
             self._show_centered_message(QMessageBox.Icon.Warning, "No selection", "Please select a config command to remove")
@@ -2795,6 +3255,7 @@ class AshitaManagerUI(QMainWindow):
         self.log(f"Removed {item_type} '{data['name']}' from script")
     
     def save_current_script(self):
+        """Save current script changes to disk."""
         if not self.current_script:
             self._show_centered_message(QMessageBox.Icon.Warning, "No script", "No script is currently loaded")
             return
@@ -2812,12 +3273,14 @@ class AshitaManagerUI(QMainWindow):
             self._show_centered_message(QMessageBox.Icon.Critical, "Error", f"Failed to save script:\n{str(e)}")
     
     def open_settings(self):
+        """Open application settings dialog."""
         dialog = SettingsDialog(self.package_tracker, self.ashita_root, self)
         dialog.exec()
 
 
 
 def main():
+    """Main application entry point. Initialize and run the Ashita Package Manager."""
     app = QApplication(sys.argv)
     app.setApplicationName("Ashita Package Manager")
     try:

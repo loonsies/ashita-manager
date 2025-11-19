@@ -7,17 +7,22 @@ from pathlib import Path
 
 class FolderStructureDetector:
     def __init__(self):
+        """Initialize folder structure detector."""
         pass
     
     def detect_all_addons(self, source_path):
-        """
-        Detect ALL addons in a repository (for monorepos)
+        """Detect all addons in a repository (for monorepos).
         
-        Returns a list of addon info dicts, each with:
-        - found: bool
-        - name: str
-        - path: Path
-        - structure: str
+        Args:
+            source_path: Path to search for addons
+        
+        Returns:
+            A list of addon info dicts, each with:
+            - found: bool - whether addon was found
+            - name: str - addon name
+            - path: Path - path to addon folder
+            - structure: str - 'nested' or 'root'
+            - repo_root: Path - root of repository
         """
         source_path = Path(source_path)
         addons = []
@@ -60,18 +65,20 @@ class FolderStructureDetector:
         return []
     
     def detect_addon_structure(self, source_path, target_name=None):
-        """
-        Detect addon folder structure
+        """Detect addon folder structure.
         
         Args:
             source_path: Path to search for addon
             target_name: Optional specific addon name to find (useful for monorepos)
         
-        Returns a dict with:
-        - found: bool - whether an addon was found
-        - name: str - addon name
-        - path: Path - path to the addon folder/files
-        - structure: str - 'root' or 'nested'
+        Returns:
+            A dict with:
+            - found: bool - whether an addon was found
+            - name: str - addon name
+            - path: Path - path to addon folder/files
+            - structure: str - 'root' or 'nested'
+            - ambiguous: bool - True if multiple lua files found but cannot determine name
+            - lua_files: list - list of lua file names (if ambiguous)
         """
         source_path = Path(source_path)
         
@@ -117,19 +124,24 @@ class FolderStructureDetector:
         # Look for .lua files at root
         lua_files = list(actual_source.glob('*.lua'))
         if lua_files:
-            # Try to find the main addon file (usually matches a pattern)
-            for lua_file in lua_files:
-                # Check if there's a matching lua file with the parent folder name
-                # or if there are multiple lua files suggesting this is the addon root
-                if len(lua_files) >= 1:
-                    # Infer addon name from the lua file or parent folder
-                    addon_name = self._infer_addon_name(actual_source, lua_files)
-                    return {
-                        'found': True,
-                        'name': addon_name,
-                        'path': actual_source,
-                        'structure': 'root'
-                    }
+            # Infer addon name from the lua file or parent folder
+            addon_name = self._infer_addon_name(actual_source, lua_files)
+            if addon_name:
+                return {
+                    'found': True,
+                    'name': addon_name,
+                    'path': actual_source,
+                    'structure': 'root'
+                }
+            else:
+                # Could not determine addon name, return ambiguous result
+                return {
+                    'found': False,
+                    'ambiguous': True,
+                    'lua_files': [lua.stem for lua in lua_files],
+                    'path': actual_source,
+                    'structure': 'root'
+                }
         
         # Pattern 3: Single folder at root that contains the addon
         for item in actual_source.iterdir():
@@ -146,17 +158,17 @@ class FolderStructureDetector:
         return {'found': False, 'name': None, 'path': None, 'structure': None}
     
     def detect_plugin_structure(self, source_path, target_name=None):
-        """
-        Detect plugin folder structure
+        """Detect plugin folder structure.
         
         Args:
             source_path: Path to search for plugin
             target_name: Optional specific plugin name to find (useful for monorepos)
         
-        Returns a dict with:
-        - found: bool - whether a plugin was found
-        - name: str - plugin name (without .dll extension)
-        - dll_path: Path - path to the .dll file
+        Returns:
+            A dict with:
+            - found: bool - whether a plugin was found
+            - name: str - plugin name (without .dll extension)
+            - dll_path: Path - path to the .dll file
         """
         source_path = Path(source_path)
         
@@ -216,33 +228,60 @@ class FolderStructureDetector:
         return {'found': False, 'name': None, 'dll_path': None}
     
     def _infer_addon_name(self, folder_path, lua_files):
-        """
-        Infer addon name from folder and lua files
+        """Infer addon name from folder path and lua files.
+        
+        Args:
+            folder_path: Path to the addon folder
+            lua_files: List of lua file Paths in the folder
+        
+        Returns:
+            str - The inferred addon name, or None if cannot determine
         """
         folder_path = Path(folder_path)
-        
-        # Check if any lua file matches the folder name
         folder_name = folder_path.name
+        folder_name_lower = folder_name.lower()
+        
+        # Step 1: Check if any lua file name exactly matches the folder name
         for lua_file in lua_files:
-            if lua_file.stem.lower() == folder_name.lower():
+            if lua_file.stem.lower() == folder_name_lower:
                 return lua_file.stem
         
-        # Check for common main file names
-        common_names = ['init', 'main', folder_name]
-        for name in common_names:
-            for lua_file in lua_files:
-                if lua_file.stem.lower() == name.lower():
-                    return name
+        # Step 2: Check if any lua file name is a substring match with the folder name
+        best_match = None
+        best_match_length = 0
         
-        # Fallback: use the first lua file's name
-        if lua_files:
+        for lua_file in lua_files:
+            lua_name_lower = lua_file.stem.lower()
+            
+            # Check if lua name appears in folder name
+            if lua_name_lower in folder_name_lower and len(lua_name_lower) > best_match_length:
+                best_match = lua_file.stem
+                best_match_length = len(lua_name_lower)
+            
+            # Check if folder name appears in lua name
+            elif folder_name_lower in lua_name_lower and len(folder_name_lower) > best_match_length:
+                best_match = lua_file.stem
+                best_match_length = len(folder_name_lower)
+        
+        if best_match and best_match_length >= 3:  # Require at least 3 chars to match
+            return best_match
+        
+        # Step 3: If only one lua file exists, it's probably the main one
+        if len(lua_files) == 1:
             return lua_files[0].stem
         
-        # Last resort: use folder name
-        return folder_name
+        # Step 4: Return None to signal that user selection is needed
+        return None
     
     def has_docs_folder(self, source_path):
-        """Check if source has a docs folder"""
+        """Check if source has a docs folder.
+        
+        Args:
+            source_path: Path to search for docs folder
+        
+        Returns:
+            A tuple of (bool - whether docs folder exists, Path - path to docs folder or None)
+        """
         source_path = Path(source_path)
         
         # Check common locations
@@ -258,7 +297,14 @@ class FolderStructureDetector:
         return False, None
     
     def has_resources_folder(self, source_path):
-        """Check if source has a resources folder"""
+        """Check if source has a resources folder.
+        
+        Args:
+            source_path: Path to search for resources folder
+        
+        Returns:
+            A tuple of (bool - whether resources folder exists, Path - path to resources folder or None)
+        """
         source_path = Path(source_path)
         
         # Check common locations
