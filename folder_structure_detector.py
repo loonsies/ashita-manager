@@ -83,10 +83,15 @@ class FolderStructureDetector:
         """
         source_path = Path(source_path)
         
-        # First, check if there's a single subdirectory
+        # Check if there are lua files at the root level first
+        # If yes, this is the addon folder (don't descend into subdirectories)
+        root_lua_files = list(source_path.glob('*.lua'))
+        has_root_lua = len(root_lua_files) > 0
+        
+        # First, check if there's a single subdirectory (only if no lua files at root)
         # Exclude .git and other hidden folders from this check
         subdirs = [d for d in source_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
-        if len(subdirs) == 1:
+        if len(subdirs) == 1 and not has_root_lua:
             # Check inside the single subdirectory
             actual_source = subdirs[0]
         else:
@@ -126,7 +131,7 @@ class FolderStructureDetector:
         lua_files = list(actual_source.glob('*.lua'))
         if lua_files:
             # Infer addon name from the lua file or parent folder
-            addon_name = self._infer_addon_name(lua_files, repo_url)
+            addon_name = self._infer_addon_name(actual_source, lua_files, repo_url)
             if addon_name:
                 return {
                     'found': True,
@@ -228,16 +233,20 @@ class FolderStructureDetector:
         
         return {'found': False, 'name': None, 'dll_path': None}
     
-    def _infer_addon_name(self, lua_files, repo_url=None):
+    def _infer_addon_name(self, folder_path, lua_files, repo_url=None):
         """Infer addon name from folder path and lua files.
         
         Args:
+            folder_path: Path to the addon folder
             lua_files: List of lua file Paths in the folder
             repo_url: Optional repository URL to extract addon name from
         
         Returns:
             str - The inferred addon name, or None if cannot determine
         """
+        folder_path = Path(folder_path)
+        folder_name = folder_path.name
+        folder_name_lower = folder_name.lower()
         
         # Step 0: Check if repo URL provides a name match
         if repo_url:
@@ -253,19 +262,29 @@ class FolderStructureDetector:
         if len(lua_files) == 1:
             return lua_files[0].stem
         
-        # Step 2: Check if any lua file name exactly matches the repo name (case-insensitive)
+        # Step 2: Check if any lua file name exactly matches the folder name (case-insensitive)
         for lua_file in lua_files:
-            if lua_file.stem.lower() == repo_name:
+            if lua_file.stem.lower() == folder_name_lower:
                 return lua_file.stem
         
-        # Step 3: Check if any lua file name is a substring match with the repo name
+        # Step 3: Check if any lua file name is a substring match with the folder name or repo name
         best_match = None
         best_match_length = 0
         
         for lua_file in lua_files:
             lua_name_lower = lua_file.stem.lower()
             
-            # Check if lua name appears in repo name
+            # Check if lua name appears in folder name
+            if lua_name_lower in folder_name_lower and len(lua_name_lower) > best_match_length:
+                best_match = lua_file.stem
+                best_match_length = len(lua_name_lower)
+            
+            # Check if folder name appears in lua name
+            elif folder_name_lower in lua_name_lower and len(folder_name_lower) > best_match_length:
+                best_match = lua_file.stem
+                best_match_length = len(folder_name_lower)
+            
+            # Check if lua name appears in repo name (from URL)
             if repo_name and lua_name_lower in repo_name and len(lua_name_lower) > best_match_length:
                 best_match = lua_file.stem
                 best_match_length = len(lua_name_lower)
@@ -278,7 +297,7 @@ class FolderStructureDetector:
         if best_match and best_match_length >= 3:  # Require at least 3 chars to match
             return best_match
         
-        # Step 3: Return None to signal that user selection is needed
+        # Step 4: Return None to signal that user selection is needed
         return None
     
     def has_docs_folder(self, source_path):

@@ -1075,6 +1075,21 @@ class PackageManager:
             if target_dir.exists():
                 return {'success': False, 'error': f'Addon "{addon_name}" already exists'}
 
+            # Check if source and target are the same or related (would cause infinite loop)
+            try:
+                addon_source_resolved = addon_source.resolve()
+                target_dir_resolved = target_dir.resolve()
+                
+                # Check if they're the same directory
+                if addon_source_resolved == target_dir_resolved:
+                    return {'success': False, 'error': f'Addon "{addon_name}" is already installed in the correct location'}
+                
+                # Check if target is inside source or source is inside target (would cause recursive copy)
+                if target_dir_resolved in addon_source_resolved.parents or addon_source_resolved in target_dir_resolved.parents:
+                    return {'success': False, 'error': 'Cannot copy addon: source and destination are nested within each other'}
+            except Exception:
+                pass  # If path resolution fails, proceed with copy attempt
+
             shutil.copytree(addon_source, target_dir)
 
             package_info = {
