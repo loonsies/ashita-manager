@@ -67,7 +67,8 @@ jobs:
           $CHANGELOG = "Initial release"
         } else {
           $RANGE = "$PREV_TAG..HEAD"
-          $CHANGELOG = git log $RANGE --pretty=format:"- [`%h`](https://github.com/${{ github.repository }}/commit/%H) %s`n"
+          $COMMITS = git log $RANGE --pretty=format:"- [`%h`](https://github.com/${{ github.repository }}/commit/%H) %s"
+          $CHANGELOG = $COMMITS -join "`n"
         }
 
         echo "changelog<<EOF" >> $env:GITHUB_OUTPUT
