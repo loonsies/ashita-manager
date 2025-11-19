@@ -206,200 +206,277 @@ class PackageManager:
             - requires_entrypoint_selection: bool - lua file selection needed
         """
         try:
-            # Create temporary directory for cloning
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_path = Path(temp_dir)
+            # Create temporary directory for cloning (will be cleaned up manually later)
+            temp_dir = tempfile.mkdtemp()
+            temp_path = Path(temp_dir)
+            
+            # Configure git to use HTTPS for SSH URLs BEFORE cloning
+            subprocess.run(
+                ['git', 'config', '--global', 'url.https://github.com/.insteadOf', 'git@github.com:'],
+                capture_output=True
+            )
+            
+            # Build clone command with optional branch
+            clone_cmd = ['git', 'clone', '--recurse-submodules']
+            if branch:
+                clone_cmd.extend(['--branch', branch])
+            clone_cmd.extend([url, str(temp_path / 'repo')])
+            
+            # Clone repository
+            result = self._run_command(
+                clone_cmd,
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode != 0:
+                # Clean up on failure
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return {'success': False, 'error': f'Git clone failed: {result.stderr}'}
+            
+            repo_path = temp_path / 'repo'
+            
+            # Get commit hash
+            commit_result = self._run_command(
+                ['git', 'rev-parse', 'HEAD'],
+                cwd=repo_path,
+                capture_output=True,
+                text=True
+            )
+            commit_hash = commit_result.stdout.strip()
+            
+            # Get branch name
+            branch_result = self._run_command(
+                ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                cwd=repo_path,
+                capture_output=True,
+                text=True
+            )
+            branch_name = branch_result.stdout.strip()
+            
+            # Detect structure and install
+            if pkg_type == 'addon':
+                # Check if this is a monorepo with multiple addons
+                all_addons = self.detector.detect_all_addons(repo_path)
                 
-                # Build clone command with optional branch
-                clone_cmd = ['git', 'clone', '--recurse-submodules']
-                if branch:
-                    clone_cmd.extend(['--branch', branch])
-                clone_cmd.extend([url, str(temp_path / 'repo')])
-                
-                # Clone repository
-                result = self._run_command(
-                    clone_cmd,
-                    capture_output=True,
-                    text=True
-                )
-                
-                if result.returncode != 0:
-                    return {'success': False, 'error': f'Git clone failed: {result.stderr}'}
-                
-                repo_path = temp_path / 'repo'
-                
-                # Get commit hash
-                commit_result = self._run_command(
-                    ['git', 'rev-parse', 'HEAD'],
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True
-                )
-                commit_hash = commit_result.stdout.strip()
-                
-                # Get branch name
-                branch_result = self._run_command(
-                    ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True
-                )
-                branch_name = branch_result.stdout.strip()
-                
-                # Detect structure and install
-                if pkg_type == 'addon':
-                    # Check if this is a monorepo with multiple addons
-                    all_addons = self.detector.detect_all_addons(repo_path)
-                    
-                    if len(all_addons) > 1:
-                        # Monorepo - check for conflicts first if not forcing
-                        if not force:
-                            all_conflicts = {}
-                            has_conflicts = False
-                            
-                            for addon_info in all_addons:
-                                addon_name = addon_info['name']
-                                conflicts = self._check_file_conflicts(repo_path, addon_name, url)
-                                if conflicts['libs'] or conflicts['docs'] or conflicts['resources']:
-                                    all_conflicts[addon_name] = conflicts
-                                    has_conflicts = True
-                            
-                            if has_conflicts:
-                                # Return combined conflict info for all addons
-                                return {
-                                    'success': False, 
-                                    'error': 'File conflicts detected in monorepo addons', 
-                                    'conflicts': all_conflicts, 
-                                    'requires_confirmation': True,
-                                    'monorepo': True,
-                                    'all_addons': all_addons
-                                }
-                        
-                        # Monorepo - install all addons
-                        installed_count = 0
-                        failed = []
-                        warnings = []
-                        
-                        for addon_info in all_addons:
-                            result = self._install_single_addon(
-                                addon_info, url, commit_hash, branch_name, None, repo_path, force=force
-                            )
-                            if result['success']:
-                                installed_count += 1
-                                if 'warnings' in result['message']:
-                                    warnings.append(f"{addon_info['name']}: {result['message']}")
-                            else:
-                                failed.append(f"{addon_info['name']}: {result['error']}")
-                        
-                        # Save once after all addons are installed
-                        self.package_tracker.save_packages()
-                        
-                        if installed_count > 0:
-                            msg = f"Installed {installed_count} addon(s) from monorepo"
-                            if failed:
-                                msg += f" ({len(failed)} failed)"
-                                for failure in failed:
-                                    msg += f"\n{failure}"
-                            if warnings:
-                                for warning in warnings:
-                                    msg += f"\n{warning}"
-                            return {'success': True, 'message': msg}
-                        else:
-                            error_msg = "Failed to install addons:"
-                            for failure in failed:
-                                error_msg += f"\n{failure}"
-                            return {'success': False, 'error': error_msg}
-                    else:
-                        # Single addon
-                        result = self._install_addon(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force, selected_entrypoint=selected_entrypoint)
+                if len(all_addons) > 1:
+                    # Monorepo detected - prompt user to select which addons to install
+                    # Don't clean up temp_dir yet - it will be used by install_selected_addons_from_monorepo
+                    return {
+                        'success': False,
+                        'requires_addon_selection': True,
+                        'available_addons': [{'name': a['name'], 'path': str(a['path'])} for a in all_addons],
+                        'repo_path': str(repo_path),
+                        'temp_dir': temp_dir,  # Pass temp_dir for cleanup
+                        'url': url,
+                        'commit_hash': commit_hash,
+                        'branch_name': branch_name
+                    }
                 else:
-                    # Plugin repo: look for variant folders containing .dll files
-                    # For official repo, only look in plugins/ folder for the specific plugin
-                    # For other repos, check for variant subfolders
-                    variants = []
-                    try:
-                        if url == self.official_repo:
-                            # Official repo: use standard plugin detection (no variants)
-                            return self._install_plugin(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force)
-                        else:
-                            # Non-official repo: look for variant folders
-                            for p in repo_path.rglob('*'):
-                                if p.is_dir():
-                                    dlls = list(p.glob('*.dll'))
-                                    if dlls:
-                                        variants.append({'path': p, 'name': p.name, 'dlls': dlls})
-                    except Exception:
-                        variants = []
-
-                    sel_path = None
-                    sel_dlls = []
-                    sel_name = None
-
-                    if plugin_variant:
-                        # try to match provided variant by folder name
-                        for v in variants:
-                            if v['name'] == plugin_variant:
-                                sel_path = v['path']
-                                sel_dlls = v['dlls']
-                                sel_name = v['name']
-                                break
-                        if not sel_path:
-                            return {'success': False, 'error': f'Plugin variant "{plugin_variant}" not found in repository'}
+                    # Single addon
+                    result = self._install_addon(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force, selected_entrypoint=selected_entrypoint)
+                    # Clean up temp directory
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    return result
+            else:
+                # Plugin repo: look for variant folders containing .dll files
+                # For official repo, only look in plugins/ folder for the specific plugin
+                # For other repos, check for variant subfolders
+                variants = []
+                try:
+                    if url == self.official_repo:
+                        # Official repo: use standard plugin detection (no variants)
+                        result = self._install_plugin(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force)
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        return result
                     else:
-                        if variants:
-                            if len(variants) == 1:
-                                sel_path = variants[0]['path']
-                                sel_dlls = variants[0]['dlls']
-                                sel_name = variants[0]['name']
-                            else:
-                                # multiple variants found, request UI selection
-                                choices = [{'name': v['name'], 'version': None} for v in variants]
-                                return {
-                                    'success': False,
-                                    'requires_variant_selection': True,
-                                    'variants': choices,
-                                    'repo_url': url
-                                }
+                        # Non-official repo: look for variant folders
+                        for p in repo_path.rglob('*'):
+                            if p.is_dir():
+                                dlls = list(p.glob('*.dll'))
+                                if dlls:
+                                    variants.append({'path': p, 'name': p.name, 'dlls': dlls})
+                except Exception:
+                    variants = []
+
+                sel_path = None
+                sel_dlls = []
+                sel_name = None
+
+                if plugin_variant:
+                    # try to match provided variant by folder name
+                    for v in variants:
+                        if v['name'] == plugin_variant:
+                            sel_path = v['path']
+                            sel_dlls = v['dlls']
+                            sel_name = v['name']
+                            break
+                    if not sel_path:
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        return {'success': False, 'error': f'Plugin variant "{plugin_variant}" not found in repository'}
+                else:
+                    if variants:
+                        if len(variants) == 1:
+                            sel_path = variants[0]['path']
+                            sel_dlls = variants[0]['dlls']
+                            sel_name = variants[0]['name']
                         else:
-                            # no variant folders found; fall back to standard plugin installer
-                            return self._install_plugin(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force)
+                            # multiple variants found, request UI selection
+                            choices = [{'name': v['name'], 'version': None} for v in variants]
+                            shutil.rmtree(temp_dir, ignore_errors=True)
+                            return {
+                                'success': False,
+                                'requires_variant_selection': True,
+                                'variants': choices,
+                                'repo_url': url
+                            }
+                    else:
+                        # no variant folders found; fall back to standard plugin installer
+                        result = self._install_plugin(repo_path, url, commit_hash, branch_name, None, target_package_name, force=force)
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        return result
 
-                    # If we have a selected path with DLLs, install first DLL
-                    if sel_path and sel_dlls:
-                        dll_path = sel_dlls[0]
-                        plugin_name = dll_path.stem
-                        target_dll = self.plugins_dir / f"{plugin_name}.dll"
+                # If we have a selected path with DLLs, install first DLL
+                if sel_path and sel_dlls:
+                    dll_path = sel_dlls[0]
+                    plugin_name = dll_path.stem
+                    target_dll = self.plugins_dir / f"{plugin_name}.dll"
 
-                        if target_dll.exists():
-                            existing_pkg = self.package_tracker.get_package(plugin_name, 'plugin')
-                            if existing_pkg and existing_pkg.get('source') == self.official_repo and url == self.official_repo:
-                                target_dll.unlink()
-                            else:
-                                return {'success': False, 'error': f'Plugin "{plugin_name}.dll" already exists'}
+                    if target_dll.exists():
+                        existing_pkg = self.package_tracker.get_package(plugin_name, 'plugin')
+                        if existing_pkg and existing_pkg.get('source') == self.official_repo and url == self.official_repo:
+                            target_dll.unlink()
+                        else:
+                            shutil.rmtree(temp_dir, ignore_errors=True)
+                            return {'success': False, 'error': f'Plugin "{plugin_name}.dll" already exists'}
 
-                        shutil.copy2(dll_path, target_dll)
+                    shutil.copy2(dll_path, target_dll)
 
-                        package_info = {
-                            'source': url,
-                            'install_method': 'git',
-                            'installed_date': datetime.now().isoformat(),
-                            'path': str(target_dll.relative_to(self.ashita_root))
-                        }
-                        if commit_hash:
-                            package_info['commit'] = commit_hash
-                            package_info['branch'] = branch_name
+                    package_info = {
+                        'source': url,
+                        'install_method': 'git',
+                        'installed_date': datetime.now().isoformat(),
+                        'path': str(target_dll.relative_to(self.ashita_root))
+                    }
+                    if commit_hash:
+                        package_info['commit'] = commit_hash
+                        package_info['branch'] = branch_name
 
-                        self.package_tracker.add_package(plugin_name, 'plugin', package_info)
-                        try:
-                            self._copy_extra_folders(repo_path, plugin_name, pkg_type='plugin')
-                        except Exception:
-                            pass
-                        self.package_tracker.save_packages()
-                        return {'success': True, 'message': f'Plugin "{plugin_name}" installed successfully'}
+                    self.package_tracker.add_package(plugin_name, 'plugin', package_info)
+                    try:
+                        self._copy_extra_folders(repo_path, plugin_name, pkg_type='plugin')
+                    except Exception:
+                        pass
+                    self.package_tracker.save_packages()
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    return {'success': True, 'message': f'Plugin "{plugin_name}" installed successfully'}
                 
-                return result
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return {'success': False, 'error': 'Unknown error occurred'}
                 
         except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def install_selected_addons_from_monorepo(self, repo_path, selected_addon_names, url, commit_hash=None, branch_name=None, force=False, temp_dir=None):
+        """Install selected addons from a monorepo after user selection.
+        
+        Args:
+            repo_path: str/Path - Path to cloned repository
+            selected_addon_names: list - List of addon names selected by user
+            url: str - Repository URL
+            commit_hash: Optional str - Git commit hash
+            branch_name: Optional str - Git branch name
+            force: bool - Skip conflict checking
+            temp_dir: Optional str - Temporary directory to clean up after installation
+        
+        Returns:
+            dict - Installation result
+        """
+        try:
+            repo_path = Path(repo_path)
+            
+            # Verify repo still exists
+            if not repo_path.exists():
+                if temp_dir:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                return {'success': False, 'error': 'Repository path no longer exists'}
+            
+            all_addons = self.detector.detect_all_addons(repo_path)
+            
+            # Filter to only selected addons
+            selected_addons = [a for a in all_addons if a['name'] in selected_addon_names]
+            
+            if not selected_addons:
+                if temp_dir:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                return {'success': False, 'error': 'No valid addons selected'}
+            
+            # Check for conflicts if not forcing
+            if not force:
+                all_conflicts = {}
+                has_conflicts = False
+                
+                for addon_info in selected_addons:
+                    addon_name = addon_info['name']
+                    conflicts = self._check_file_conflicts(repo_path, addon_name, url)
+                    if conflicts['libs'] or conflicts['docs'] or conflicts['resources']:
+                        all_conflicts[addon_name] = conflicts
+                        has_conflicts = True
+                
+                if has_conflicts:
+                    if temp_dir:
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                    return {
+                        'success': False, 
+                        'error': 'File conflicts detected', 
+                        'conflicts': all_conflicts, 
+                        'requires_confirmation': True,
+                        'monorepo': True,
+                        'all_addons': selected_addons
+                    }
+            
+            # Install selected addons
+            installed_count = 0
+            failed = []
+            warnings = []
+            
+            for addon_info in selected_addons:
+                result = self._install_single_addon(
+                    addon_info, url, commit_hash, branch_name, None, repo_path, force=force
+                )
+                if result['success']:
+                    installed_count += 1
+                    if 'warnings' in result.get('message', ''):
+                        warnings.append(f"{addon_info['name']}: {result['message']}")
+                else:
+                    failed.append(f"{addon_info['name']}: {result.get('error', 'Unknown error')}")
+            
+            # Save once after all addons are installed
+            self.package_tracker.save_packages()
+            
+            # Clean up temp directory
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            
+            if installed_count > 0:
+                msg = f"Installed {installed_count} addon(s)"
+                if failed:
+                    msg += f" ({len(failed)} failed)"
+                    for failure in failed:
+                        msg += f"\n{failure}"
+                if warnings:
+                    for warning in warnings:
+                        msg += f"\n{warning}"
+                return {'success': True, 'message': msg}
+            else:
+                error_msg = "Failed to install addons:"
+                for failure in failed:
+                    error_msg += f"\n{failure}"
+                return {'success': False, 'error': error_msg}
+                
+        except Exception as e:
+            if temp_dir:
+                shutil.rmtree(temp_dir, ignore_errors=True)
             return {'success': False, 'error': str(e)}
     
     def install_from_release(self, url, pkg_type, force=False, plugin_variant=None, asset_download_url=None, asset_name=None, selected_entrypoint=None):
@@ -794,7 +871,7 @@ class PackageManager:
             self.package_tracker.add_package(addon_name, 'addon', package_info)
             
             # Copy extra folders (libs, docs, resources)
-            self._copy_extra_folders(repo_root, addon_name, pkg_type='addon')
+            self._copy_extra_folders(repo_root, addon_name, pkg_type='addon', addon_source_path=addon_source)
             self.package_tracker.save_packages()
             
             return {'success': True, 'message': f'Addon "{addon_name}" installed successfully'}
@@ -1258,19 +1335,21 @@ class PackageManager:
         
         return conflicts
     
-    def _copy_extra_folders(self, source_path, package_name, pkg_type='addon', is_monorepo=False):
+    def _copy_extra_folders(self, source_path, package_name, pkg_type='addon', is_monorepo=False, addon_source_path=None):
         """Copy extra documentation and resource folders.
         
         Args:
-            source_path: str/Path - Source directory
+            source_path: str/Path - Source directory (repository root)
             package_name: str - Target package name
             pkg_type: str - 'addon' or 'plugin'
             is_monorepo: bool - Whether source is from monorepo
+            addon_source_path: Optional Path - The actual addon folder path (to check if docs/resources are siblings)
         
         Returns:
             None
         """
         source_path = Path(source_path)
+        addon_source_path = Path(addon_source_path) if addon_source_path else None
         errors = []
         
         subdirs = [d for d in source_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
@@ -1318,6 +1397,9 @@ class PackageManager:
             doc_files = []
             found_docs = False
             
+            # Only copy docs if they are OUTSIDE (siblings of) the addon folder
+            # Don't need to pre-check - we'll check each location individually
+            
             if is_multi_folder_repo:
                 package_docs_locations = [
                     actual_source / 'docs',
@@ -1332,44 +1414,55 @@ class PackageManager:
             for docs_location in package_docs_locations:
                 if not docs_location.exists() or not docs_location.is_dir():
                     continue
+                
+                # Skip if docs_location is inside addon_source_path
+                # This means docs/ is part of the addon itself
+                if addon_source_path:
+                    try:
+                        docs_location.relative_to(addon_source_path)
+                        # docs_location is inside or IS the addon folder's docs, skip
+                        continue
+                    except ValueError:
+                        # docs_location is NOT inside addon folder, proceed to copy
+                        pass
+                        
+                    target_docs = self.docs_dir / package_name
+                    source_to_copy = None
                     
-                target_docs = self.docs_dir / package_name
-                source_to_copy = None
-                
-                package_variations = [
-                    docs_location / package_name,
-                    docs_location / package_name.lower(),
-                    docs_location / package_name.upper(),
-                    docs_location / package_name.title()
-                ]
-                
-                for variation in package_variations:
-                    if variation.exists() and variation.is_dir():
-                        source_to_copy = variation
+                    package_variations = [
+                        docs_location / package_name,
+                        docs_location / package_name.lower(),
+                        docs_location / package_name.upper(),
+                        docs_location / package_name.title()
+                    ]
+                    
+                    for variation in package_variations:
+                        if variation.exists() and variation.is_dir():
+                            source_to_copy = variation
+                            break
+                    
+                    if not source_to_copy:
+                        if is_multi_folder_repo:
+                            source_to_copy = docs_location
+                        else:
+                            source_to_copy = docs_location
+                    
+                    if source_to_copy and source_to_copy.exists():
+                        if target_docs.exists():
+                            self._remove_directory_safe(target_docs)
+                        shutil.copytree(source_to_copy, target_docs)
+                        
+                        for item in source_to_copy.rglob('*'):
+                            if item.is_file():
+                                rel_path = item.relative_to(source_to_copy)
+                                target_file = target_docs / rel_path
+                                try:
+                                    tracked_path = target_file.relative_to(self.ashita_root)
+                                except ValueError:
+                                    tracked_path = rel_path
+                                doc_files.append(str(tracked_path))
+                        found_docs = True
                         break
-                
-                if not source_to_copy:
-                    if is_multi_folder_repo:
-                        source_to_copy = docs_location
-                    else:
-                        source_to_copy = docs_location
-                
-                if source_to_copy and source_to_copy.exists():
-                    if target_docs.exists():
-                        self._remove_directory_safe(target_docs)
-                    shutil.copytree(source_to_copy, target_docs)
-                    
-                    for item in source_to_copy.rglob('*'):
-                        if item.is_file():
-                            rel_path = item.relative_to(source_to_copy)
-                            target_file = target_docs / rel_path
-                            try:
-                                tracked_path = target_file.relative_to(self.ashita_root)
-                            except ValueError:
-                                tracked_path = rel_path
-                            doc_files.append(str(tracked_path))
-                    found_docs = True
-                    break
             
             if doc_files:
                 pkg = self.package_tracker.get_package(package_name, pkg_type)
@@ -1381,6 +1474,9 @@ class PackageManager:
         try:
             resource_files = []
             found_resources = False
+            
+            # Only copy resources if they are OUTSIDE (siblings of) the addon folder
+            # Don't need to pre-check - we'll check each location individually
             
             if is_multi_folder_repo:
                 package_resources_locations = [
@@ -1397,68 +1493,79 @@ class PackageManager:
                 if not res_location.exists() or not res_location.is_dir():
                     continue
                 
-                resources_dir = self.ashita_root / 'resources'
-                resources_dir.mkdir(exist_ok=True, parents=True)
-                
-                package_variations = [
-                    res_location / package_name,
-                    res_location / package_name.lower(),
-                    res_location / package_name.upper(),
-                    res_location / package_name.title()
-                ]
-                
-                has_package_subfolder = any(v.exists() and v.is_dir() for v in package_variations)
-                
-                if has_package_subfolder:
-                    for variation in package_variations:
-                        if variation.exists() and variation.is_dir():
-                            target_resources = resources_dir / package_name
-                            if target_resources.exists():
-                                self._remove_directory_safe(target_resources)
-                            shutil.copytree(variation, target_resources)
-                            
-                            for item in variation.rglob('*'):
-                                if item.is_file():
-                                    rel_path = item.relative_to(variation)
-                                    target_file = target_resources / rel_path
-                                    try:
-                                        tracked_path = target_file.relative_to(self.ashita_root)
-                                    except ValueError:
-                                        tracked_path = rel_path
-                                    resource_files.append(str(tracked_path))
-                            found_resources = True
-                            break
-                else:
-                    for subdir in res_location.iterdir():
-                        if subdir.is_dir():
-                            target_subdir = resources_dir / subdir.name
-                            if target_subdir.exists():
-                                for item in subdir.rglob('*'):
+                # Skip if res_location is inside addon_source_path
+                # This means resources/ is part of the addon itself
+                if addon_source_path:
+                    try:
+                        res_location.relative_to(addon_source_path)
+                        # res_location is inside or IS the addon folder's resources, skip
+                        continue
+                    except ValueError:
+                        # res_location is NOT inside addon folder, proceed to copy
+                        pass
+                    
+                    resources_dir = self.ashita_root / 'resources'
+                    resources_dir.mkdir(exist_ok=True, parents=True)
+                    
+                    package_variations = [
+                        res_location / package_name,
+                        res_location / package_name.lower(),
+                        res_location / package_name.upper(),
+                        res_location / package_name.title()
+                    ]
+                    
+                    has_package_subfolder = any(v.exists() and v.is_dir() for v in package_variations)
+                    
+                    if has_package_subfolder:
+                        for variation in package_variations:
+                            if variation.exists() and variation.is_dir():
+                                target_resources = resources_dir / package_name
+                                if target_resources.exists():
+                                    self._remove_directory_safe(target_resources)
+                                shutil.copytree(variation, target_resources)
+                                
+                                for item in variation.rglob('*'):
                                     if item.is_file():
-                                        rel_path = item.relative_to(res_location)
-                                        target_file = resources_dir / rel_path
-                                        target_file.parent.mkdir(parents=True, exist_ok=True)
-                                        shutil.copy2(item, target_file)
+                                        rel_path = item.relative_to(variation)
+                                        target_file = target_resources / rel_path
                                         try:
                                             tracked_path = target_file.relative_to(self.ashita_root)
                                         except ValueError:
                                             tracked_path = rel_path
                                         resource_files.append(str(tracked_path))
-                            else:
-                                shutil.copytree(subdir, target_subdir)
-                                for item in subdir.rglob('*'):
-                                    if item.is_file():
-                                        rel_path = item.relative_to(res_location)
-                                        target_file = resources_dir / rel_path
-                                        try:
-                                            tracked_path = target_file.relative_to(self.ashita_root)
-                                        except ValueError:
-                                            tracked_path = rel_path
-                                        resource_files.append(str(tracked_path))
-                    found_resources = True
-                
-                if found_resources:
-                    break
+                                found_resources = True
+                                break
+                    else:
+                        for subdir in res_location.iterdir():
+                            if subdir.is_dir():
+                                target_subdir = resources_dir / subdir.name
+                                if target_subdir.exists():
+                                    for item in subdir.rglob('*'):
+                                        if item.is_file():
+                                            rel_path = item.relative_to(res_location)
+                                            target_file = resources_dir / rel_path
+                                            target_file.parent.mkdir(parents=True, exist_ok=True)
+                                            shutil.copy2(item, target_file)
+                                            try:
+                                                tracked_path = target_file.relative_to(self.ashita_root)
+                                            except ValueError:
+                                                tracked_path = rel_path
+                                            resource_files.append(str(tracked_path))
+                                else:
+                                    shutil.copytree(subdir, target_subdir)
+                                    for item in subdir.rglob('*'):
+                                        if item.is_file():
+                                            rel_path = item.relative_to(res_location)
+                                            target_file = resources_dir / rel_path
+                                            try:
+                                                tracked_path = target_file.relative_to(self.ashita_root)
+                                            except ValueError:
+                                                tracked_path = rel_path
+                                            resource_files.append(str(tracked_path))
+                        found_resources = True
+                    
+                    if found_resources:
+                        break
             
             if resource_files:
                 pkg = self.package_tracker.get_package(package_name, pkg_type)

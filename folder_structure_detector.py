@@ -35,7 +35,7 @@ class FolderStructureDetector:
         else:
             actual_source = source_path
         
-        # Check for 'addons' folder in the structure
+        # Pattern 1: Check for 'addons' folder in the structure
         addons_folder = actual_source / 'addons'
         if addons_folder.exists() and addons_folder.is_dir():
             # Find all addon folders inside
@@ -52,8 +52,27 @@ class FolderStructureDetector:
                             'repo_root': actual_source
                         })
         
-        # If we found addons, return them all
+        # If we found addons in the addons/ folder, return them
         if addons:
+            return addons
+        
+        # Pattern 2: Check for multiple addon folders at root level
+        # Look for directories that contain a .lua file matching the directory name
+        for item in actual_source.iterdir():
+            if item.is_dir() and not item.name.startswith('.'):
+                # Check if this directory has a matching lua file
+                main_lua = item / f"{item.name}.lua"
+                if main_lua.exists():
+                    addons.append({
+                        'found': True,
+                        'name': item.name,
+                        'path': item,
+                        'structure': 'nested',
+                        'repo_root': actual_source
+                    })
+        
+        # If we found multiple addons at root level, return them all
+        if len(addons) > 1:
             return addons
         
         # Fall back to single addon detection

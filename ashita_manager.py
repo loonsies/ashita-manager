@@ -13,7 +13,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMessageBox, QProgressDialog, QGroupBox, QTextEdit,
                              QDialog, QDialogButtonBox, QFormLayout, QFileDialog,
                              QSpinBox, QScrollArea, QInputDialog, QStyle,
-                             QTreeWidget, QTreeWidgetItem, QStackedWidget)
+                             QTreeWidget, QTreeWidgetItem, QStackedWidget,
+                             QCheckBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QIcon, QGuiApplication
 
@@ -44,6 +45,7 @@ class InstallWorker(QThread):
     conflict_detected = pyqtSignal(dict)
     variant_selection_requested = pyqtSignal(dict)
     entrypoint_selection_requested = pyqtSignal(dict)
+    addon_selection_requested = pyqtSignal(dict)
     progress = pyqtSignal(str)
     
     def __init__(self, package_manager, url, pkg_type, install_method, branch=None, force=False, plugin_variant=None, release_asset_url=None, release_asset_name=None, selected_entrypoint=None):
@@ -106,6 +108,8 @@ class InstallWorker(QThread):
                 self.finished.emit(True, result['message'])
             elif result.get('requires_confirmation'):
                 self.conflict_detected.emit(result)
+            elif result.get('requires_addon_selection'):
+                self.addon_selection_requested.emit(result)
             elif result.get('requires_variant_selection'):
                 self.variant_selection_requested.emit(result)
             elif result.get('requires_entrypoint_selection'):
@@ -1639,6 +1643,7 @@ class AshitaManagerUI(QMainWindow):
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.install_finished)
         self.worker.conflict_detected.connect(self.handle_install_conflict)
+        self.worker.addon_selection_requested.connect(self.handle_addon_selection)
         self.worker.variant_selection_requested.connect(self.handle_variant_selection)
         self.worker.entrypoint_selection_requested.connect(self.handle_entrypoint_selection)
         self.worker.start()
@@ -1840,6 +1845,7 @@ class AshitaManagerUI(QMainWindow):
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.install_finished)
         self.worker.conflict_detected.connect(self.handle_install_conflict)  # In case nested conflicts occur
+        self.worker.addon_selection_requested.connect(self.handle_addon_selection)
         self.worker.variant_selection_requested.connect(self.handle_variant_selection)
         self.worker.entrypoint_selection_requested.connect(self.handle_entrypoint_selection)
         self.worker.start()
@@ -1974,9 +1980,157 @@ class AshitaManagerUI(QMainWindow):
             self.worker.progress.connect(self.log)
             self.worker.finished.connect(self.install_finished)
             self.worker.conflict_detected.connect(self.handle_install_conflict)
+            self.worker.addon_selection_requested.connect(self.handle_addon_selection)
             self.worker.variant_selection_requested.connect(self.handle_variant_selection)
             self.worker.entrypoint_selection_requested.connect(self.handle_entrypoint_selection)
             self.worker.start()
+
+    def handle_addon_selection(self, result):
+        """Handle monorepo addon selection request.
+        
+        Args:
+            result: dict - Installation result with available addons
+        """
+        try:
+            self.progress.close()
+        except Exception:
+            pass
+
+        available_addons = result.get('available_addons', [])
+        if not available_addons:
+            self._show_centered_message(QMessageBox.Icon.Critical, "Error", "No addons found in repository")
+            return
+        
+        # Store result data for retry
+        self._pending_addon_selection_result = result
+        
+        # Create multi-selection dialog with checkboxes
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select addons to install")
+        dialog.setMinimumWidth(400)
+        
+        layout = QVBoxLayout()
+        
+        label = QLabel("Multiple addons found in repository. Select which ones to install:")
+        layout.addWidget(label)
+        
+        # Create scroll area for checkboxes
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        checkbox_widget = QWidget()
+        checkbox_layout = QVBoxLayout()
+        
+        checkboxes = []
+        for addon in available_addons:
+            addon_name = addon.get('name', 'Unknown')
+            checkbox = QCheckBox(addon_name)
+            checkbox.setChecked(True)  # Check all by default
+            checkbox_layout.addWidget(checkbox)
+            checkboxes.append(checkbox)
+        
+        checkbox_widget.setLayout(checkbox_layout)
+        scroll.setWidget(checkbox_widget)
+        layout.addWidget(scroll)
+        
+        button_layout = QHBoxLayout()
+        install_button = QPushButton("Install Selected")
+        cancel_button = QPushButton("Cancel")
+        
+        button_layout.addWidget(install_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+        
+        dialog.setLayout(layout)
+        
+        def on_install():
+            selected_names = [cb.text() for cb in checkboxes if cb.isChecked()]
+            if not selected_names:
+                self._show_centered_message(QMessageBox.Icon.Warning, "Warning", "No addons selected")
+                return
+            dialog.accept()
+            self._retry_with_addon_selection(selected_names, result)
+        
+        def on_cancel():
+            dialog.reject()
+            self.log("Addon selection cancelled by user")
+        
+        install_button.clicked.connect(on_install)
+        cancel_button.clicked.connect(on_cancel)
+        
+        dialog.exec()
+    
+    def _retry_with_addon_selection(self, selected_addon_names, result):
+        """Retry installation with selected addons from monorepo.
+        
+        Args:
+            selected_addon_names: list - List of addon names to install
+            result: dict - Original installation result with repo_path, url, etc.
+        """
+        if not selected_addon_names:
+            self._show_centered_message(QMessageBox.Icon.Warning, "Warning", "No addons selected")
+            return
+        
+        repo_path = result.get('repo_path')
+        url = result.get('url')
+        commit_hash = result.get('commit_hash')
+        branch_name = result.get('branch_name')
+        temp_dir = result.get('temp_dir')
+        
+        if not repo_path or not url:
+            self._show_centered_message(QMessageBox.Icon.Critical, "Error", "Missing repository information")
+            return
+        
+        self.log(f"Installing selected addons: {', '.join(selected_addon_names)}")
+        self.progress = self._create_progress("Installing selected addons...", None, 0, 0)
+        
+        # Create a new worker that calls the monorepo install method
+        from PyQt6.QtCore import QThread, pyqtSignal
+        
+        class MonorepoInstallWorker(QThread):
+            finished = pyqtSignal(bool, str)
+            progress = pyqtSignal(str)
+            
+            def __init__(self, package_manager, repo_path, selected_names, url, commit_hash, branch_name, temp_dir):
+                super().__init__()
+                self.package_manager = package_manager
+                self.repo_path = repo_path
+                self.selected_names = selected_names
+                self.url = url
+                self.commit_hash = commit_hash
+                self.branch_name = branch_name
+                self.temp_dir = temp_dir
+            
+            def run(self):
+                try:
+                    result = self.package_manager.install_selected_addons_from_monorepo(
+                        self.repo_path,
+                        self.selected_names,
+                        self.url,
+                        commit_hash=self.commit_hash,
+                        branch_name=self.branch_name,
+                        force=False,
+                        temp_dir=self.temp_dir
+                    )
+                    if result['success']:
+                        self.finished.emit(True, result['message'])
+                    else:
+                        self.finished.emit(False, result.get('error', 'Unknown error'))
+                except Exception as e:
+                    self.finished.emit(False, str(e))
+        
+        self.monorepo_worker = MonorepoInstallWorker(
+            self.package_manager,
+            repo_path,
+            selected_addon_names,
+            url,
+            commit_hash,
+            branch_name,
+            temp_dir
+        )
+        self.monorepo_worker.progress.connect(self.update_progress)
+        self.monorepo_worker.progress.connect(self.log)
+        self.monorepo_worker.finished.connect(self.install_finished)
+        self.monorepo_worker.start()
 
     def _retry_install_with_variant(self, variant_name, is_release_asset=False, asset_url=None):
         """Retry installation with selected plugin variant.
@@ -2027,6 +2181,7 @@ class AshitaManagerUI(QMainWindow):
         self.worker.progress.connect(self.log)
         self.worker.finished.connect(self.install_finished)
         self.worker.conflict_detected.connect(self.handle_install_conflict)
+        self.worker.addon_selection_requested.connect(self.handle_addon_selection)
         self.worker.variant_selection_requested.connect(self.handle_variant_selection)
         self.worker.entrypoint_selection_requested.connect(self.handle_entrypoint_selection)
         self.worker.start()
