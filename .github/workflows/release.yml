@@ -67,10 +67,9 @@ jobs:
           $CHANGELOG = "Initial release"
         } else {
           $RANGE = "$PREV_TAG..HEAD"
-          $CHANGELOG = git log $RANGE --pretty=format:"- [`%h`](https://github.com/${{ github.repository }}/commit/%H) %s"
+          $CHANGELOG = git log $RANGE --pretty=format:"- [`%h`](https://github.com/${{ github.repository }}/commit/%H) %s`n"
         }
 
-        # Ensure newlines are preserved for GitHub Actions
         echo "changelog<<EOF" >> $env:GITHUB_OUTPUT
         echo "$CHANGELOG" >> $env:GITHUB_OUTPUT
         echo "EOF" >> $env:GITHUB_OUTPUT
@@ -82,3 +81,4 @@ jobs:
         name: ${{ github.event.inputs.version }}
         body: ${{ steps.changelog.outputs.changelog }}
         files: dist/Ashita Package Manager.exe
+
