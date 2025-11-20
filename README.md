@@ -16,8 +16,6 @@
 
 ## This utility is still in testing and developement, please use carefully. Strongly recommended to backup your Ashita installation before starting to use it. Use at your own risk.
 
-## At this moment, the package manager assumes all addons/plugins in your folders comes pre-installed with Ashita. Recommended to use on a fresh install, then reinstall your addons/plugins using the package manager.
-
 ## Features
 - **Install from Git/Release:** Paste a repo URL, auto-detect type, pick branch, install
 - **Initial scan:** Finds existing addons/plugins in your Ashita install on first launch
@@ -49,3 +47,4 @@ python -m PyInstaller --onefile --windowed --name "Ashita Package Manager" --ico
 ```
 
 The compiled .exe will be in the `dist/` folder as `Ashita Package Manager.exe`.
+
