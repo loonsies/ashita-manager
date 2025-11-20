@@ -184,6 +184,29 @@ class PackageManager:
         # Default to main if detection fails
         return 'main'
     
+    def _find_readme_file(self, directory):
+        """Find README file in a directory.
+        
+        Args:
+            directory: str/Path - Directory to search for README
+        
+        Returns:
+            Path - Path to README file if found, None otherwise
+        """
+        directory = Path(directory)
+        if not directory.exists() or not directory.is_dir():
+            return None
+        
+        # Common README file variations
+        readme_variations = ['README.md', 'readme.md', 'Readme.md', 'README.MD', 'README.txt', 'readme.txt', 'INDEX.html', 'index.html', 'Index.html', 'README.html', 'readme.html', 'Readme.html', 'README.htm', 'readme.htm', 'Readme.htm']
+        
+        for readme_name in readme_variations:
+            readme_path = directory / readme_name
+            if readme_path.exists() and readme_path.is_file():
+                return readme_path
+        
+        return None
+    
     def install_from_git(self, url, pkg_type, target_package_name=None, branch=None, force=False, plugin_variant=None, selected_entrypoint=None):
         """Install a package by cloning from git.
         
@@ -1468,6 +1491,43 @@ class PackageManager:
                 pkg = self.package_tracker.get_package(package_name, pkg_type)
                 if pkg:
                     pkg['doc_files'] = doc_files
+            
+            # If no docs were found, check for README in repo root
+            if not found_docs:
+                # Check the original source_path (repo root), not actual_source
+                readme_file = self._find_readme_file(source_path)
+                if readme_file:
+                    # Check if README is inside the addon/plugin folder itself
+                    skip_readme = False
+                    if addon_source_path:
+                        try:
+                            readme_file.relative_to(addon_source_path)
+                            # README is inside addon folder, skip it
+                            skip_readme = True
+                        except ValueError:
+                            # README is NOT inside addon folder, proceed to copy
+                            pass
+                    
+                    if not skip_readme:
+                        # Create docs/packagename directory
+                        target_docs = self.docs_dir / package_name
+                        target_docs.mkdir(parents=True, exist_ok=True)
+                        
+                        # Copy README to docs/packagename/
+                        target_readme = target_docs / readme_file.name
+                        shutil.copy2(readme_file, target_readme)
+                        
+                        # Track the README file
+                        try:
+                            tracked_path = target_readme.relative_to(self.ashita_root)
+                        except ValueError:
+                            tracked_path = Path('docs') / package_name / readme_file.name
+                        doc_files.append(str(tracked_path))
+                        
+                        # Update package info
+                        pkg = self.package_tracker.get_package(package_name, pkg_type)
+                        if pkg:
+                            pkg['doc_files'] = doc_files
         except Exception as e:
             errors.append(f"Error copying docs: {e}")
         

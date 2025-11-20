@@ -84,6 +84,11 @@ class MarkdownViewer(QWidget):
         settings = self.view.settings()
         settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True)
         
+        # Track page load state and pending content
+        self._page_loaded = False
+        self._pending_content = None
+        self.view.loadFinished.connect(self._on_page_loaded)
+        
         # Load the markdown HTML template
         html_path = current_dir / "markdown.html"
         if html_path.exists():
@@ -100,9 +105,21 @@ class MarkdownViewer(QWidget):
         # Connect download manager to document
         self.download_manager.finished.connect(self.document.set_text)
     
+    def _on_page_loaded(self, ok):
+        """Handle page load completion"""
+        self._page_loaded = ok
+        if ok and self._pending_content is not None:
+            # Set any content that was pending
+            self.document.set_text(self._pending_content)
+            self._pending_content = None
+    
     def set_markdown(self, markdown_text):
         """Set markdown content directly from a string"""
-        self.document.set_text(markdown_text)
+        if self._page_loaded:
+            self.document.set_text(markdown_text)
+        else:
+            # Store content to set after page loads
+            self._pending_content = markdown_text
     
     def set_html(self, html_content):
         """Set raw HTML content directly (renders without markdown parsing)"""
@@ -112,7 +129,6 @@ class MarkdownViewer(QWidget):
         <html>
         <head>
             <meta charset="utf-8">
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/sindresorhus/github-markdown-css@5/github-markdown.css">
             <style>
                 body {{
                     padding: 20px;

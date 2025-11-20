@@ -2796,19 +2796,31 @@ class AshitaManagerUI(QMainWindow):
                 package_name = data.get('name')
                 
                 # Find README file
-                if pkg_type == 'addon':
-                    package_dir = self.package_manager.addons_dir / package_name
-                else:
-                    # For plugins, check docs folder
-                    package_dir = self.package_manager.docs_dir / package_name
-                
                 readme_files = ['README.md', 'readme.md', 'Readme.md', 'README.MD', 'README.txt', 'readme.txt', 'INDEX.html', 'index.html', 'Index.html', 'README.html', 'readme.html', 'Readme.html', 'README.htm', 'readme.htm', 'Readme.htm']
                 readme_path = None
                 
-                for readme_name in readme_files:
-                    potential_path = package_dir / readme_name
-                    if potential_path.exists():
-                        readme_path = potential_path
+                # For addons, check both addon folder and docs folder
+                # For plugins, check docs folder
+                if pkg_type == 'addon':
+                    search_locations = [
+                        self.package_manager.addons_dir / package_name,
+                        self.package_manager.docs_dir / package_name
+                    ]
+                else:
+                    search_locations = [
+                        self.package_manager.docs_dir / package_name
+                    ]
+                
+                # Search all locations for README
+                for package_dir in search_locations:
+                    if not package_dir.exists():
+                        continue
+                    for readme_name in readme_files:
+                        potential_path = package_dir / readme_name
+                        if potential_path.exists():
+                            readme_path = potential_path
+                            break
+                    if readme_path:
                         break
                 
                 if readme_path:
