@@ -3,6 +3,7 @@ Markdown Viewer
 Displays markdown content with support for remote images using QWebEngineView and marked.js
 """
 
+import sys
 from pathlib import Path
 from PyQt6.QtCore import pyqtProperty, pyqtSignal, QObject, QUrl
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
@@ -66,7 +67,13 @@ class MarkdownViewer(QWidget):
         super().__init__(parent)
         
         # Get the directory where this script is located
-        current_dir = Path(__file__).parent
+        # Handle bundled app
+        if getattr(sys, 'frozen', False):
+            # Running as compiled executable
+            current_dir = Path(sys._MEIPASS)
+        else:
+            # Running as script
+            current_dir = Path(__file__).parent
         
         # Create the document and web channel
         self.document = Document(self)

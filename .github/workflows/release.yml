@@ -38,7 +38,7 @@ jobs:
 
     - name: Build EXE with PyInstaller
       run: |
-        python -m PyInstaller --onefile --windowed --name "Ashita Package Manager" --icon assets/logo.ico --add-data "assets:assets" ashita_manager.py
+        python -m PyInstaller --onefile --windowed --name "Ashita Package Manager" --icon assets/logo.ico --add-data "assets:assets" --add-data "markdown.html;." ashita_manager.py
 
     - name: Commit and push version update
       run: |
