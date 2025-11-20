@@ -3008,7 +3008,7 @@ class AshitaManagerUI(QMainWindow):
         self.available_plugins_list.clear()
         all_packages = self.package_tracker.get_all_packages()
         installed_plugins = all_packages.get('plugins', {})
-        script_plugin_names = {p['name'] for p in self.current_script.plugins}
+        script_plugin_names = {p['name'].lower() for p in self.current_script.plugins}
         
         # Categorize available plugins
         categories = {
@@ -3019,7 +3019,7 @@ class AshitaManagerUI(QMainWindow):
         }
 
         for plugin_name in sorted(installed_plugins.keys()):
-            if plugin_name not in script_plugin_names:
+            if plugin_name.lower() not in script_plugin_names:
                 plugin_info = installed_plugins[plugin_name]
                 install_method = plugin_info.get('install_method', 'pre-installed')
                 if install_method not in categories:
@@ -3062,7 +3062,7 @@ class AshitaManagerUI(QMainWindow):
         # Populate available addons
         self.available_addons_list.clear()
         installed_addons = all_packages.get('addons', {})
-        script_addon_names = {a['name'] for a in self.current_script.addons}
+        script_addon_names = {a['name'].lower() for a in self.current_script.addons}
         
         categories = {
             'pre-installed': [],
@@ -3072,7 +3072,7 @@ class AshitaManagerUI(QMainWindow):
         }
 
         for addon_name in sorted(installed_addons.keys()):
-            if addon_name not in script_addon_names:
+            if addon_name.lower() not in script_addon_names:
                 addon_info = installed_addons[addon_name]
                 install_method = addon_info.get('install_method', 'pre-installed')
                 if install_method not in categories:
@@ -3367,7 +3367,7 @@ class AshitaManagerUI(QMainWindow):
         if item_type == 'plugin':
             self.current_script.plugins.append({'name': package_name, 'enabled': True})
         else:  # addon
-            self.current_script.addons.append({'name': package_name, 'enabled': True})
+            self.current_script.addons.append({'name': package_name, 'enabled': True, 'args': ''})
         
         # Refresh UI to show updated lists
         self.populate_script_ui()

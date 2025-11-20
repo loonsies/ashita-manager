@@ -211,7 +211,7 @@ class PackageManager:
             temp_path = Path(temp_dir)
             
             # Configure git to use HTTPS for SSH URLs BEFORE cloning
-            subprocess.run(
+            self._run_command(
                 ['git', 'config', '--global', 'url.https://github.com/.insteadOf', 'git@github.com:'],
                 capture_output=True
             )
