@@ -31,6 +31,19 @@ from package_tracker import PackageTracker
 from script_parser import ScriptParser
 
 
+def format_result_summary(groups):
+    """Format named result groups with counts for dialogs and the activity log."""
+    lines = []
+    for label, names in groups:
+        lines.append(f"{label} ({len(names)}):")
+        if names:
+            lines.extend(f"  {name}" for name in names)
+        else:
+            lines.append("  None")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 class InstallWorker(QThread):
     """Thread worker for package git/release installation.
     
@@ -231,7 +244,7 @@ class UpdateWorker(QThread):
 
 class BatchUpdateWorker(QThread):
     """Worker thread for batch update"""
-    finished = pyqtSignal(int, int, int)  # updated, failed, skipped
+    finished = pyqtSignal(dict)
     progress = pyqtSignal(str, int, int)
     log = pyqtSignal(str)
     
@@ -256,55 +269,63 @@ class BatchUpdateWorker(QThread):
     def run(self):
         """Execute batch update for multiple packages.
         
-        Emits: progress(message), finished(updated, failed)
+        Emits progress and a result with names in each outcome group.
         """
-        updated = 0
-        failed = 0
-        skipped = 0
+        summary = {'updated': [], 'passed': [], 'failed': [],
+                   'not_checked': [], 'cancelled': False}
         total = len(self.package_list)
         
         for idx, package_name in enumerate(self.package_list):
             # Check for cancellation
             if self._is_cancelled:
-                self.log.emit(f"Batch update cancelled by user")
+                summary['cancelled'] = True
+                summary['not_checked'] = self.package_list[idx:]
+                self.log.emit("Batch update cancelled by user")
                 break
             
             self.progress.emit(f"Checking {package_name}...", idx, total)
             self.log.emit(f"[{idx + 1}/{total}] Checking {package_name}...")
             
-            result = self.package_manager.update_package(package_name, self.pkg_type)
+            try:
+                result = self.package_manager.update_package(package_name, self.pkg_type)
+            except Exception as error:
+                result = {'success': False, 'error': str(error)}
             
             if result.get('requires_manual_update'):
-                failed += 1
                 reason = result.get('reason') or 'Manual input required'
+                summary['failed'].append({'name': package_name,
+                                          'reason': f'Manual update required ({reason})'})
                 self.log.emit(f"{package_name} requires manual update ({reason}). Skipping in batch.")
                 continue
 
-            if result['success']:
+            if result.get('success'):
                 if result.get('already_updated', False):
-                    skipped += 1
+                    summary['passed'].append(package_name)
                     self.log.emit(f"{package_name} already up-to-date")
                 else:
-                    updated += 1
+                    summary['updated'].append(package_name)
                     self.log.emit(f"{package_name} updated successfully")
             else:
-                failed += 1
-                self.log.emit(f"{package_name} failed: {result.get('error', 'Unknown error')}")
-        self.finished.emit(updated, failed, skipped)
+                reason = result.get('error', 'Unknown error')
+                summary['failed'].append({'name': package_name, 'reason': reason})
+                self.log.emit(f"{package_name} failed: {reason}")
+        self.finished.emit(summary)
 
 
 class ScanWorker(QThread):
     finished = pyqtSignal(dict)
     progress = pyqtSignal(str)
     
-    def __init__(self, package_manager):
+    def __init__(self, package_manager, only_untracked=False):
         """Initialize scan worker.
         
         Args:
             package_manager: PackageManager - Package manager instance
+            only_untracked: bool - Index only new local packages when True
         """
         super().__init__()
         self.package_manager = package_manager
+        self.only_untracked = only_untracked
     
     def run(self):
         """Scan existing addons and plugins.
@@ -312,8 +333,12 @@ class ScanWorker(QThread):
         Emits: finished(results)
         """
         try:
-            self.progress.emit("Scanning for existing packages...")
-            results = self.package_manager.scan_existing_packages()
+            if self.only_untracked:
+                self.progress.emit("Scanning for new addons and plugins...")
+                results = self.package_manager.rescan_untracked_packages()
+            else:
+                self.progress.emit("Scanning for existing packages...")
+                results = self.package_manager.scan_existing_packages()
             self.finished.emit(results)
         except Exception as e:
             self.finished.emit({'addons': 0, 'plugins': 0, 'error': str(e)})
@@ -382,12 +407,13 @@ class ManualPackageDialog(QDialog):
         form = QFormLayout(widget)
 
         self.addon_path_input = QLineEdit()
+        self.addon_path_input.setPlaceholderText("One addon or a folder containing several addons")
         addon_browse = QPushButton("Browse...")
-        addon_browse.clicked.connect(lambda: self._browse_folder(self.addon_path_input, "Select addon folder"))
+        addon_browse.clicked.connect(lambda: self._browse_folder(self.addon_path_input, "Select addon or bundle folder"))
         addon_row = QHBoxLayout()
         addon_row.addWidget(self.addon_path_input)
         addon_row.addWidget(addon_browse)
-        form.addRow("Addon folder:", addon_row)
+        form.addRow("Addon / bundle folder:", addon_row)
 
         self.addon_docs_input = QLineEdit()
         docs_browse = QPushButton("Browse...")
@@ -929,12 +955,13 @@ class AshitaManagerUI(QMainWindow):
         self.remove_addon_btn.clicked.connect(lambda: self.remove_package("addon"))
         addon_buttons.addWidget(self.remove_addon_btn)
 
-        self.refresh_addon_btn = QPushButton("Refresh list")
+        self.rescan_addon_btn = QPushButton("Rescan folders")
         icon = self._std_icon('refresh')
         if not icon.isNull():
-            self.refresh_addon_btn.setIcon(icon)
-        self.refresh_addon_btn.clicked.connect(self.refresh_package_lists)
-        addon_buttons.addWidget(self.refresh_addon_btn)
+            self.rescan_addon_btn.setIcon(icon)
+        self.rescan_addon_btn.setToolTip("Find new addons and plugins already in Ashita folders")
+        self.rescan_addon_btn.clicked.connect(self.rescan_packages)
+        addon_buttons.addWidget(self.rescan_addon_btn)
 
         self.open_addon_repo_btn = QPushButton("Open repository")
         icon = self._std_icon('install')
@@ -991,12 +1018,13 @@ class AshitaManagerUI(QMainWindow):
         self.remove_plugin_btn.clicked.connect(lambda: self.remove_package("plugin"))
         plugin_buttons.addWidget(self.remove_plugin_btn)
 
-        self.refresh_plugin_btn = QPushButton("Refresh list")
+        self.rescan_plugin_btn = QPushButton("Rescan folders")
         icon = self._std_icon('refresh')
         if not icon.isNull():
-            self.refresh_plugin_btn.setIcon(icon)
-        self.refresh_plugin_btn.clicked.connect(self.refresh_package_lists)
-        plugin_buttons.addWidget(self.refresh_plugin_btn)
+            self.rescan_plugin_btn.setIcon(icon)
+        self.rescan_plugin_btn.setToolTip("Find new addons and plugins already in Ashita folders")
+        self.rescan_plugin_btn.clicked.connect(self.rescan_packages)
+        plugin_buttons.addWidget(self.rescan_plugin_btn)
 
         self.open_plugin_repo_btn = QPushButton("Open repository")
         icon = self._std_icon('install')
@@ -1423,6 +1451,27 @@ class AshitaManagerUI(QMainWindow):
                 return QMessageBox.critical(self, title, text)
             else:
                 return QMessageBox.information(self, title, text)
+
+    def _show_summary_dialog(self, title, summary):
+        """Show a scrollable result summary with every package name visible."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QVBoxLayout(dialog)
+        details = QTextEdit(dialog)
+        details.setReadOnly(True)
+        details.setPlainText(summary)
+        layout.addWidget(details)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.resize(560, 360)
+        self._center_widget(dialog)
+        dialog.exec()
+
+    def _log_summary(self, summary):
+        for line in summary.splitlines():
+            if line:
+                self.log(line)
     
     def log(self, message):
         """Add a message to the log."""
@@ -1518,6 +1567,41 @@ class AshitaManagerUI(QMainWindow):
             self.scan_worker.progress.connect(self.log)
             self.scan_worker.finished.connect(self.scan_finished)
             self.scan_worker.start()
+
+    def rescan_packages(self):
+        """Index new packages already present in the Ashita folders."""
+        if getattr(self, 'scan_worker', None) and self.scan_worker.isRunning():
+            return
+
+        self.log("Scanning Ashita folders for new packages...")
+        self.rescan_addon_btn.setEnabled(False)
+        self.rescan_plugin_btn.setEnabled(False)
+        self.scan_progress = self._create_progress("Scanning Ashita folders...", None, 0, 0)
+        self.scan_worker = ScanWorker(self.package_manager, only_untracked=True)
+        self.scan_worker.progress.connect(self.scan_progress.setLabelText)
+        self.scan_worker.finished.connect(self.rescan_finished)
+        self.scan_worker.start()
+
+    def rescan_finished(self, results):
+        """Show newly discovered packages and refresh both lists."""
+        self.scan_progress.close()
+        self.rescan_addon_btn.setEnabled(True)
+        self.rescan_plugin_btn.setEnabled(True)
+        self.refresh_package_lists()
+
+        summary = format_result_summary([
+            ('New addons', results.get('addon_names', [])),
+            ('New plugins', results.get('plugin_names', [])),
+        ])
+        if results.get('error'):
+            summary = f"Rescan stopped: {results['error']}\n\n{summary}"
+            self._log_summary(summary)
+            self._show_summary_dialog("Rescan failed", summary)
+            return
+
+        self.log("Rescan complete")
+        self._log_summary(summary)
+        self._show_summary_dialog("Rescan complete", summary)
     
     def scan_finished(self, results):
         """Handle completion of package scan.
@@ -1690,6 +1774,7 @@ class AshitaManagerUI(QMainWindow):
         self.manual_install_worker.progress.connect(self.update_progress)
         self.manual_install_worker.progress.connect(self.log)
         self.manual_install_worker.finished.connect(self.manual_install_finished)
+        self.manual_install_worker.entrypoint_selection_requested.connect(self.handle_entrypoint_selection)
         self.manual_install_worker.start()
 
     def manual_install_finished(self, success, message):
@@ -1932,6 +2017,8 @@ class AshitaManagerUI(QMainWindow):
             payload = {
                 'pkg_type': 'addon',
                 'addon_path': addon_path,
+                'docs_path': result.get('docs_path'),
+                'resources_path': result.get('resources_path'),
                 'selected_entrypoint': entrypoint_name
             }
             
@@ -2676,20 +2763,24 @@ class AshitaManagerUI(QMainWindow):
         self.batch_progress.setValue(current)
         QApplication.processEvents()
     
-    def batch_update_finished(self, updated, failed, skipped):
-        """Handle batch update completion.
-        
-        Args:
-            updated: int - Number of successfully updated packages
-            failed: int - Number of failed updates
-            skipped: int - Number of skipped packages
-        """
+    def batch_update_finished(self, results):
+        """Show and log the result of every checked package."""
         self.batch_progress.close()
         self.refresh_package_lists()
-        
-        summary = f"Batch update complete!\n\nUpdated: {updated}\nAlready up-to-date: {skipped}\nFailed: {failed}"
-        self.log(f"Batch update complete: {updated} updated, {skipped} skipped, {failed} failed")
-        self._show_centered_message(QMessageBox.Icon.Information, "Batch update complete", summary)
+
+        failures = [f"{item['name']}: {item['reason']}" for item in results['failed']]
+        groups = [
+            ('Updated', results['updated']),
+            ('Passed, already up to date', results['passed']),
+            ('Failed', failures),
+        ]
+        if results['not_checked']:
+            groups.append(('Not checked', results['not_checked']))
+        summary = format_result_summary(groups)
+        title = 'Batch update cancelled' if results['cancelled'] else 'Batch update complete'
+        self.log(title)
+        self._log_summary(summary)
+        self._show_summary_dialog(title, summary)
     
     def remove_package(self, pkg_type):
         """Remove selected package from installation.

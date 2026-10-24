@@ -65,7 +65,7 @@ class FolderStructureDetector:
         # Pattern 2: Check for multiple addon folders at root level
         # Look for directories that contain a .lua file matching the directory name
         for item in actual_source.iterdir():
-            if item.is_dir() and not item.name.startswith('.'):
+            if item.is_dir() and not item.name.startswith('.') and item.name.casefold() != 'libs':
                 # Check if this directory has a matching lua file
                 main_lua = self._find_main_lua(item, item.name)
                 if main_lua:

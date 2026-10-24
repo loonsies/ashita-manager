@@ -1121,6 +1121,52 @@ class PackageManager:
                     resource_files.append(str(item))
         return resource_files
 
+    @staticmethod
+    def _matching_manual_folder(folder, package_name):
+        """Find a package-specific docs or resources folder in a bundle."""
+        if not folder:
+            return None
+        folder = Path(folder)
+        if folder.name.casefold() == package_name.casefold():
+            return folder
+        for parent in (folder, folder / 'addons'):
+            if parent.is_dir():
+                match = next((child for child in parent.iterdir()
+                              if child.is_dir() and child.name.casefold() == package_name.casefold()), None)
+                if match:
+                    return match
+        return None
+
+    def _manual_install_addon_bundle(self, addons, docs_path=None, resources_path=None):
+        """Install each addon found in a manually selected bundle."""
+        for folder, label in ((docs_path, 'Documentation'), (resources_path, 'Resources')):
+            if folder and not Path(folder).is_dir():
+                return {'success': False, 'error': f'{label} path is not a folder'}
+
+        installed = 0
+        failed = []
+        for addon in sorted(addons, key=lambda item: item['name'].casefold()):
+            name = addon['name']
+            result = self.manual_install_addon(
+                addon['path'],
+                docs_path=self._matching_manual_folder(docs_path, name),
+                resources_path=self._matching_manual_folder(resources_path, name),
+                expected_name=name,
+            )
+            if result['success']:
+                installed += 1
+            else:
+                failed.append(f"{name}: {result.get('error', 'Unknown error')}")
+
+        message = f'Installed {installed} addon(s) manually'
+        if failed:
+            message += '\n' + '\n'.join(failed)
+        result = {'success': installed > 0, 'message': message,
+                  'installed_count': installed, 'failed_count': len(failed)}
+        if installed == 0:
+            result['error'] = message
+        return result
+
     def manual_install_addon(self, addon_path, docs_path=None, resources_path=None, expected_name=None, selected_entrypoint=None):
         """Install an addon from a manually selected folder.
         
@@ -1140,8 +1186,13 @@ class PackageManager:
         """
         try:
             source_path = Path(addon_path)
-            if not source_path.exists():
+            if not source_path.is_dir():
                 return {'success': False, 'error': 'Selected addon folder does not exist'}
+
+            if not expected_name and not selected_entrypoint and not any(source_path.glob('*.lua')):
+                addons = self.detector.detect_all_addons(source_path)
+                if len(addons) > 1:
+                    return self._manual_install_addon_bundle(addons, docs_path, resources_path)
 
             addon_info = self.detector.detect_addon_structure(source_path)
             
@@ -1153,7 +1204,9 @@ class PackageManager:
                         'success': False,
                         'requires_entrypoint_selection': True,
                         'lua_files': addon_info['lua_files'],
-                        'addon_path': str(source_path)
+                        'addon_path': str(source_path),
+                        'docs_path': str(docs_path) if docs_path else None,
+                        'resources_path': str(resources_path) if resources_path else None,
                     }
                 else:
                     # User has selected an entrypoint
@@ -2549,6 +2602,56 @@ class PackageManager:
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
+    def rescan_untracked_packages(self):
+        """Index valid addons and plugins already on disk but absent from the tracker."""
+        result = {'addons': 0, 'plugins': 0, 'addon_names': [], 'plugin_names': []}
+        tracked = self.package_tracker.get_all_packages()
+        tracked_addons = {name.casefold() for name in tracked.get('addons', {})}
+        tracked_plugins = {name.casefold() for name in tracked.get('plugins', {})}
+
+        for addon_dir in self.addons_dir.iterdir():
+            name = addon_dir.name.casefold()
+            if (not addon_dir.is_dir() or name in tracked_addons or name == 'libs'
+                    or name.startswith('.') or name.endswith('.backup')):
+                continue
+            if not self.detector._find_main_lua(addon_dir, addon_dir.name):
+                continue
+            info = {
+                'source': 'unknown',
+                'install_method': 'manual',
+                'installed_date': datetime.now().isoformat(),
+                'path': str(addon_dir.relative_to(self.ashita_root)),
+            }
+            if not self.package_tracker.add_package(addon_dir.name, 'addon', info):
+                result['error'] = 'Could not save the package tracker'
+                return result
+            tracked_addons.add(addon_dir.name.casefold())
+            result['addon_names'].append(addon_dir.name)
+            result['addons'] += 1
+
+        for plugin_file in self.plugins_dir.iterdir():
+            if not plugin_file.is_file() or plugin_file.suffix.casefold() != '.dll':
+                continue
+            name = plugin_file.stem
+            if name.casefold() in tracked_plugins:
+                continue
+            info = {
+                'source': 'unknown',
+                'install_method': 'manual',
+                'installed_date': datetime.now().isoformat(),
+                'path': str(plugin_file.relative_to(self.ashita_root)),
+            }
+            if not self.package_tracker.add_package(name, 'plugin', info):
+                result['error'] = 'Could not save the package tracker'
+                return result
+            tracked_plugins.add(name.casefold())
+            result['plugin_names'].append(name)
+            result['plugins'] += 1
+
+        result['addon_names'].sort(key=str.casefold)
+        result['plugin_names'].sort(key=str.casefold)
+        return result
+
     def scan_existing_packages(self):
         """Scan for existing addons and plugins on first launch.
         

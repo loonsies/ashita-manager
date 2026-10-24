@@ -7,8 +7,9 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from ashita_manager import AshitaManagerUI, BatchUpdateWorker
 from folder_structure_detector import FolderStructureDetector
 from package_manager import PackageManager
 from package_tracker import PackageTracker
@@ -356,6 +357,213 @@ class PackageLifecycleTests(unittest.TestCase):
         self.assertEqual(file.read_bytes(), b'original version')
         self.assertEqual(self.tracker.get_package('UnchangedCommitPlugin', 'plugin'),
                          original_info)
+
+
+class RescanTests(unittest.TestCase):
+    def test_rescan_indexes_only_new_valid_packages_without_network_or_copying(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ashita = Path(temporary)
+            tracker = PackageTracker(ashita)
+            manager = PackageManager(ashita, tracker)
+
+            existing_addon = {'source': 'file:///fixtures/existing-addon',
+                              'install_method': 'git', 'commit': 'saved-commit',
+                              'doc_files': ['docs/existing-addon/guide.html']}
+            existing_plugin = {'source': 'file:///fixtures/existing-plugin',
+                               'install_method': 'release', 'release_tag': 'v1'}
+            tracker.add_package('ExistingAddon', 'addon', existing_addon.copy())
+            tracker.add_package('ExistingPlugin', 'plugin', existing_plugin.copy())
+
+            make_files(ashita, [
+                'addons/existingaddon/existingaddon.lua',
+                'addons/NewAddon/newaddon.lua',
+                'addons/InvalidAddon/helper.lua',
+                'addons/libs/libs.lua',
+                'addons/SavedAddon.backup/SavedAddon.backup.lua',
+                'plugins/existingplugin.dll',
+                'plugins/NewPlugin.DLL',
+                'plugins/NotAPlugin.dll.backup',
+            ])
+            new_addon = ashita / 'addons/NewAddon/newaddon.lua'
+            new_plugin = ashita / 'plugins/NewPlugin.DLL'
+
+            with patch.object(manager, '_fetch_official_repo_catalog',
+                              side_effect=AssertionError('catalog lookup is unnecessary')), \
+                    patch.object(manager, '_detect_git_metadata',
+                                 side_effect=AssertionError('Git metadata is unnecessary')):
+                first = manager.rescan_untracked_packages()
+                second = manager.rescan_untracked_packages()
+
+            self.assertEqual(first, {'addons': 1, 'plugins': 1,
+                                     'addon_names': ['NewAddon'],
+                                     'plugin_names': ['NewPlugin']})
+            self.assertEqual(second, {'addons': 0, 'plugins': 0,
+                                      'addon_names': [], 'plugin_names': []})
+            self.assertEqual(tracker.get_package('ExistingAddon', 'addon'), existing_addon)
+            self.assertEqual(tracker.get_package('ExistingPlugin', 'plugin'), existing_plugin)
+            self.assertIsNone(tracker.get_package('InvalidAddon', 'addon'))
+            self.assertIsNone(tracker.get_package('libs', 'addon'))
+            self.assertIsNone(tracker.get_package('SavedAddon.backup', 'addon'))
+            self.assertIsNone(tracker.get_package('NotAPlugin', 'plugin'))
+            for name, pkg_type in [('NewAddon', 'addon'), ('NewPlugin', 'plugin')]:
+                info = tracker.get_package(name, pkg_type)
+                self.assertEqual(info['install_method'], 'manual')
+                self.assertEqual(info['source'], 'unknown')
+                self.assertTrue((ashita / info['path']).exists())
+            self.assertEqual(new_addon.read_bytes(), b'fixture')
+            self.assertEqual(new_plugin.read_bytes(), b'fixture')
+
+
+class ManualBundleTests(unittest.TestCase):
+    def test_manual_install_adds_every_addon_in_selected_folder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / 'download' / 'addons'
+            docs = root / 'download' / 'docs'
+            resources = root / 'download' / 'resources'
+            make_files(bundle, [
+                'FirstBundleAddon/FirstBundleAddon.lua',
+                'FirstBundleAddon/helper.lua',
+                'SecondBundleAddon/SecondBundleAddon.lua',
+                'libs/shared.lua',
+            ])
+            make_files(docs, ['addons/firstbundleaddon/guide.html',
+                              'addons/SecondBundleAddon/guide.html'])
+            make_files(resources, ['FirstBundleAddon/settings.xml',
+                                   'SecondBundleAddon/settings.xml'])
+            ashita = root / 'ashita'
+            ashita.mkdir()
+            tracker = PackageTracker(ashita)
+            manager = PackageManager(ashita, tracker)
+
+            result = manager.manual_install_addon(
+                bundle, docs_path=docs, resources_path=resources
+            )
+
+            self.assertTrue(result['success'], result)
+            self.assertEqual(result['installed_count'], 2)
+            for name in ('FirstBundleAddon', 'SecondBundleAddon'):
+                info = tracker.get_package(name, 'addon')
+                self.assertEqual(info['install_method'], 'manual')
+                self.assertTrue((ashita / 'addons' / name / f'{name}.lua').is_file())
+                self.assertEqual(info['doc_files'],
+                                 [str(Path('docs') / name / 'guide.html')])
+                self.assertEqual(info['resource_files'],
+                                 [str(Path('resources') / name / 'settings.xml')])
+            self.assertIsNone(tracker.get_package('libs', 'addon'))
+            self.assertFalse((ashita / 'addons/libs').exists())
+
+    def test_manual_bundle_preserves_an_existing_addon(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / 'download'
+            make_files(bundle, ['ExistingBundleAddon/ExistingBundleAddon.lua',
+                                'NewBundleAddon/NewBundleAddon.lua'])
+            ashita = root / 'ashita'
+            ashita.mkdir()
+            old_file = ashita / 'addons/ExistingBundleAddon/ExistingBundleAddon.lua'
+            old_file.parent.mkdir(parents=True)
+            old_file.write_bytes(b'existing version')
+            tracker = PackageTracker(ashita)
+            manager = PackageManager(ashita, tracker)
+            tracker.add_package('ExistingBundleAddon', 'addon',
+                                {'source': 'file:///fixtures/old', 'install_method': 'git'})
+
+            result = manager.manual_install_addon(bundle)
+
+            self.assertTrue(result['success'], result)
+            self.assertEqual(result['installed_count'], 1)
+            self.assertEqual(result['failed_count'], 1)
+            self.assertIn('ExistingBundleAddon', result['message'])
+            self.assertEqual(old_file.read_bytes(), b'existing version')
+            self.assertEqual(tracker.get_package('ExistingBundleAddon', 'addon')['source'],
+                             'file:///fixtures/old')
+            self.assertTrue((ashita / 'addons/NewBundleAddon/NewBundleAddon.lua').is_file())
+
+
+class BatchResultSummaryTests(unittest.TestCase):
+    def test_batch_worker_reports_each_outcome_and_failure_reason(self):
+        manager = Mock()
+        outcomes = {
+            'UpdatedAddon': {'success': True},
+            'CurrentAddon': {'success': True, 'already_updated': True},
+            'FailedAddon': {'success': False, 'error': 'Download failed'},
+            'ManualAddon': {'success': False, 'requires_manual_update': True,
+                            'reason': 'Select a release asset'},
+        }
+        manager.update_package.side_effect = lambda name, kind: outcomes[name]
+        worker = BatchUpdateWorker(manager, list(outcomes), 'addon')
+        received = []
+        worker.finished.connect(received.append)
+
+        worker.run()
+
+        self.assertEqual(received, [{
+            'updated': ['UpdatedAddon'],
+            'passed': ['CurrentAddon'],
+            'failed': [
+                {'name': 'FailedAddon', 'reason': 'Download failed'},
+                {'name': 'ManualAddon',
+                 'reason': 'Manual update required (Select a release asset)'},
+            ],
+            'not_checked': [],
+            'cancelled': False,
+        }])
+
+    def test_cancelled_batch_reports_packages_not_checked(self):
+        manager = Mock()
+        worker = BatchUpdateWorker(manager, ['FirstAddon', 'SecondAddon'], 'addon')
+        received = []
+        worker.finished.connect(received.append)
+        worker.cancel()
+
+        worker.run()
+
+        self.assertEqual(received[0]['not_checked'], ['FirstAddon', 'SecondAddon'])
+        self.assertTrue(received[0]['cancelled'])
+        manager.update_package.assert_not_called()
+
+    def test_batch_completion_shows_and_logs_counts_names_and_reasons(self):
+        ui = Mock()
+        ui._log_summary.side_effect = lambda summary: AshitaManagerUI._log_summary(ui, summary)
+        results = {
+            'updated': ['UpdatedAddon'],
+            'passed': ['CurrentAddon'],
+            'failed': [{'name': 'FailedAddon', 'reason': 'Download failed'}],
+            'not_checked': [],
+            'cancelled': False,
+        }
+
+        AshitaManagerUI.batch_update_finished(ui, results)
+
+        ui.batch_progress.close.assert_called_once()
+        ui.refresh_package_lists.assert_called_once()
+        title, summary = ui._show_summary_dialog.call_args.args
+        self.assertEqual(title, 'Batch update complete')
+        for expected in ('Updated (1):\n  UpdatedAddon',
+                         'Passed, already up to date (1):\n  CurrentAddon',
+                         'Failed (1):\n  FailedAddon: Download failed'):
+            self.assertIn(expected, summary)
+        self.assertIn('  FailedAddon: Download failed',
+                      [call.args[0] for call in ui.log.call_args_list])
+
+    def test_rescan_completion_shows_and_logs_discovered_names(self):
+        ui = Mock()
+        ui._log_summary.side_effect = lambda summary: AshitaManagerUI._log_summary(ui, summary)
+
+        AshitaManagerUI.rescan_finished(ui, {
+            'addons': 2, 'plugins': 1,
+            'addon_names': ['FirstAddon', 'SecondAddon'],
+            'plugin_names': ['NewPlugin'],
+        })
+
+        ui.scan_progress.close.assert_called_once()
+        ui.refresh_package_lists.assert_called_once()
+        title, summary = ui._show_summary_dialog.call_args.args
+        self.assertEqual(title, 'Rescan complete')
+        self.assertIn('New addons (2):\n  FirstAddon\n  SecondAddon', summary)
+        self.assertIn('New plugins (1):\n  NewPlugin', summary)
+        self.assertIn('  NewPlugin', [call.args[0] for call in ui.log.call_args_list])
 
 
 if __name__ == '__main__':
