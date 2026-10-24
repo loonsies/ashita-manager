@@ -282,7 +282,7 @@ class PackageManager:
                 # Check if this is a monorepo with multiple addons
                 all_addons = self.detector.detect_all_addons(repo_path)
                 
-                if len(all_addons) > 1:
+                if len(all_addons) > 1 and not target_package_name:
                     # Monorepo detected - prompt user to select which addons to install
                     # Don't clean up temp_dir yet - it will be used by install_selected_addons_from_monorepo
                     return {
@@ -1376,7 +1376,10 @@ class PackageManager:
         errors = []
         
         subdirs = [d for d in source_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
-        if len(subdirs) == 1:
+        if (len(subdirs) == 1
+                and subdirs[0].name.lower() not in {'addons', 'plugins', 'docs', 'resources'}
+                and not any(source_path.glob('*.dll'))
+                and not any(source_path.glob('*.lua'))):
             actual_source = subdirs[0]
         else:
             actual_source = source_path
@@ -1384,6 +1387,8 @@ class PackageManager:
         has_addons_folder = (actual_source / 'addons').exists()
         has_plugins_folder = (actual_source / 'plugins').exists()
         is_multi_folder_repo = has_addons_folder or has_plugins_folder
+        is_multi_addon_repo = (pkg_type == 'addon'
+                               and len(self.detector.detect_all_addons(actual_source)) > 1)
         
         if is_multi_folder_repo:
             try:
@@ -1423,16 +1428,7 @@ class PackageManager:
             # Only copy docs if they are OUTSIDE (siblings of) the addon folder
             # Don't need to pre-check - we'll check each location individually
             
-            if is_multi_folder_repo:
-                package_docs_locations = [
-                    actual_source / 'docs',
-                    actual_source / 'Docs',
-                ]
-            else:
-                package_docs_locations = [
-                    actual_source / 'docs',
-                    actual_source / 'Docs',
-                ]
+            package_docs_locations = [actual_source / 'docs', actual_source / 'Docs']
             
             for docs_location in package_docs_locations:
                 if not docs_location.exists() or not docs_location.is_dir():
@@ -1449,43 +1445,42 @@ class PackageManager:
                         # docs_location is NOT inside addon folder, proceed to copy
                         pass
                         
-                    target_docs = self.docs_dir / package_name
-                    source_to_copy = None
+                target_docs = self.docs_dir / package_name
+                source_to_copy = None
                     
-                    package_variations = [
-                        docs_location / package_name,
-                        docs_location / package_name.lower(),
-                        docs_location / package_name.upper(),
-                        docs_location / package_name.title()
-                    ]
+                package_variations = [
+                    docs_location / package_name,
+                    docs_location / package_name.lower(),
+                    docs_location / package_name.upper(),
+                    docs_location / package_name.title()
+                ]
                     
-                    for variation in package_variations:
-                        if variation.exists() and variation.is_dir():
-                            source_to_copy = variation
-                            break
-                    
-                    if not source_to_copy:
-                        if is_multi_folder_repo:
-                            source_to_copy = docs_location
-                        else:
-                            source_to_copy = docs_location
-                    
-                    if source_to_copy and source_to_copy.exists():
-                        if target_docs.exists():
-                            self._remove_directory_safe(target_docs)
-                        shutil.copytree(source_to_copy, target_docs)
-                        
-                        for item in source_to_copy.rglob('*'):
-                            if item.is_file():
-                                rel_path = item.relative_to(source_to_copy)
-                                target_file = target_docs / rel_path
-                                try:
-                                    tracked_path = target_file.relative_to(self.ashita_root)
-                                except ValueError:
-                                    tracked_path = rel_path
-                                doc_files.append(str(tracked_path))
-                        found_docs = True
+                for variation in package_variations:
+                    if variation.exists() and variation.is_dir():
+                        source_to_copy = variation
                         break
+                    
+                if not source_to_copy:
+                    if is_multi_addon_repo:
+                        continue
+                    source_to_copy = docs_location
+                    
+                if source_to_copy and source_to_copy.exists():
+                    if target_docs.exists():
+                        self._remove_directory_safe(target_docs)
+                    shutil.copytree(source_to_copy, target_docs)
+                        
+                    for item in source_to_copy.rglob('*'):
+                        if item.is_file():
+                            rel_path = item.relative_to(source_to_copy)
+                            target_file = target_docs / rel_path
+                            try:
+                                tracked_path = target_file.relative_to(self.ashita_root)
+                            except ValueError:
+                                tracked_path = rel_path
+                            doc_files.append(str(tracked_path))
+                    found_docs = True
+                    break
             
             if doc_files:
                 pkg = self.package_tracker.get_package(package_name, pkg_type)
@@ -1538,16 +1533,7 @@ class PackageManager:
             # Only copy resources if they are OUTSIDE (siblings of) the addon folder
             # Don't need to pre-check - we'll check each location individually
             
-            if is_multi_folder_repo:
-                package_resources_locations = [
-                    actual_source / 'resources',
-                    actual_source / 'Resources',
-                ]
-            else:
-                package_resources_locations = [
-                    actual_source / 'resources',
-                    actual_source / 'Resources',
-                ]
+            package_resources_locations = [actual_source / 'resources', actual_source / 'Resources']
             
             for res_location in package_resources_locations:
                 if not res_location.exists() or not res_location.is_dir():
@@ -1564,68 +1550,52 @@ class PackageManager:
                         # res_location is NOT inside addon folder, proceed to copy
                         pass
                     
-                    resources_dir = self.ashita_root / 'resources'
-                    resources_dir.mkdir(exist_ok=True, parents=True)
+                resources_dir = self.ashita_root / 'resources'
+                resources_dir.mkdir(exist_ok=True, parents=True)
                     
-                    package_variations = [
-                        res_location / package_name,
-                        res_location / package_name.lower(),
-                        res_location / package_name.upper(),
-                        res_location / package_name.title()
-                    ]
+                package_variations = [
+                    res_location / package_name,
+                    res_location / package_name.lower(),
+                    res_location / package_name.upper(),
+                    res_location / package_name.title()
+                ]
                     
-                    has_package_subfolder = any(v.exists() and v.is_dir() for v in package_variations)
+                has_package_subfolder = any(v.exists() and v.is_dir() for v in package_variations)
+
+                if is_multi_addon_repo and not has_package_subfolder:
+                    continue
                     
-                    if has_package_subfolder:
-                        for variation in package_variations:
-                            if variation.exists() and variation.is_dir():
-                                target_resources = resources_dir / package_name
-                                if target_resources.exists():
-                                    self._remove_directory_safe(target_resources)
-                                shutil.copytree(variation, target_resources)
+                if has_package_subfolder:
+                    for variation in package_variations:
+                        if variation.exists() and variation.is_dir():
+                            target_resources = resources_dir / package_name
+                            if target_resources.exists():
+                                self._remove_directory_safe(target_resources)
+                            shutil.copytree(variation, target_resources)
                                 
-                                for item in variation.rglob('*'):
-                                    if item.is_file():
-                                        rel_path = item.relative_to(variation)
-                                        target_file = target_resources / rel_path
-                                        try:
-                                            tracked_path = target_file.relative_to(self.ashita_root)
-                                        except ValueError:
-                                            tracked_path = rel_path
-                                        resource_files.append(str(tracked_path))
-                                found_resources = True
-                                break
-                    else:
-                        for subdir in res_location.iterdir():
-                            if subdir.is_dir():
-                                target_subdir = resources_dir / subdir.name
-                                if target_subdir.exists():
-                                    for item in subdir.rglob('*'):
-                                        if item.is_file():
-                                            rel_path = item.relative_to(res_location)
-                                            target_file = resources_dir / rel_path
-                                            target_file.parent.mkdir(parents=True, exist_ok=True)
-                                            shutil.copy2(item, target_file)
-                                            try:
-                                                tracked_path = target_file.relative_to(self.ashita_root)
-                                            except ValueError:
-                                                tracked_path = rel_path
-                                            resource_files.append(str(tracked_path))
-                                else:
-                                    shutil.copytree(subdir, target_subdir)
-                                    for item in subdir.rglob('*'):
-                                        if item.is_file():
-                                            rel_path = item.relative_to(res_location)
-                                            target_file = resources_dir / rel_path
-                                            try:
-                                                tracked_path = target_file.relative_to(self.ashita_root)
-                                            except ValueError:
-                                                tracked_path = rel_path
-                                            resource_files.append(str(tracked_path))
-                        found_resources = True
+                            for item in variation.rglob('*'):
+                                if item.is_file():
+                                    rel_path = item.relative_to(variation)
+                                    target_file = target_resources / rel_path
+                                    try:
+                                        tracked_path = target_file.relative_to(self.ashita_root)
+                                    except ValueError:
+                                        tracked_path = rel_path
+                                    resource_files.append(str(tracked_path))
+                            found_resources = True
+                            break
+                else:
+                    for item in res_location.rglob('*'):
+                        if item.is_file():
+                            rel_path = item.relative_to(res_location)
+                            target_file = resources_dir / rel_path
+                            target_file.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(item, target_file)
+                            resource_files.append(str(target_file.relative_to(self.ashita_root)))
+                    found_resources = True
                     
-                    if found_resources:
-                        break
+                if found_resources:
+                    break
             
             if resource_files:
                 pkg = self.package_tracker.get_package(package_name, pkg_type)
@@ -2214,13 +2184,6 @@ class PackageManager:
                 if update_install_method == 'git':
                     branch = self.official_repo_branch if source_url == self.official_repo else None
                     result = self.install_from_git(source_url, pkg_type, target_package_name=package_name, branch=branch)
-                    if isinstance(result, dict) and result.get('requires_variant_selection'):
-                        result = result.copy()
-                        result.setdefault('error', 'Variant selection required')
-                        result['package_name'] = package_name
-                        result['pkg_type'] = pkg_type
-                        result['is_update'] = True
-                        return result
                 else:
                     preferred_asset_name = release_asset_name or package_info.get('release_asset_name')
                     result = self.install_from_release(
@@ -2229,13 +2192,18 @@ class PackageManager:
                         asset_download_url=release_asset_url,
                         asset_name=preferred_asset_name
                     )
-                    if result.get('requires_variant_selection'):
-                        result = result.copy()
-                        result.setdefault('error', 'Variant selection required')
-                        result['package_name'] = package_name
-                        result['pkg_type'] = pkg_type
-                        result['is_update'] = True
-                        return result
+
+                if any(result.get(key) for key in (
+                        'requires_variant_selection', 'requires_addon_selection',
+                        'requires_entrypoint_selection')):
+                    self._restore_backup(package_name, pkg_type, backup_path)
+                    self.package_tracker.add_package(package_name, pkg_type, old_package_info)
+                    selection_result = result.copy()
+                    selection_result.setdefault('error', 'Selection required')
+                    selection_result['package_name'] = package_name
+                    selection_result['pkg_type'] = pkg_type
+                    selection_result['is_update'] = True
+                    return selection_result
                 
                 if result['success']:
                     # Success, remove backup
@@ -2255,17 +2223,7 @@ class PackageManager:
                     return {'success': True, 'message': f'Package "{package_name}" updated successfully'}
                 else:
                     # Failed, restore backup
-                    if backup_path and backup_path.exists():
-                        if pkg_type == 'addon':
-                            target_dir = self.addons_dir / package_name
-                            if target_dir.exists():
-                                self._remove_directory_safe(target_dir)
-                            shutil.move(str(backup_path), str(target_dir))
-                        else:
-                            target_dll = self.plugins_dir / f"{package_name}.dll"
-                            if target_dll.exists():
-                                target_dll.unlink()
-                            shutil.move(str(backup_path), str(target_dll))
+                    self._restore_backup(package_name, pkg_type, backup_path)
                     
                     # Restore tracker entry
                     self.package_tracker.add_package(package_name, pkg_type, old_package_info)
@@ -2274,17 +2232,7 @@ class PackageManager:
             
             except Exception as e:
                 # Exception during update, restore backup
-                if backup_path and backup_path.exists():
-                    if pkg_type == 'addon':
-                        target_dir = self.addons_dir / package_name
-                        if target_dir.exists():
-                            self._remove_directory_safe(target_dir)
-                        shutil.move(str(backup_path), str(target_dir))
-                    else:
-                        target_dll = self.plugins_dir / f"{package_name}.dll"
-                        if target_dll.exists():
-                            target_dll.unlink()
-                        shutil.move(str(backup_path), str(target_dll))
+                self._restore_backup(package_name, pkg_type, backup_path)
                 
                 # Restore tracker entry
                 self.package_tracker.add_package(package_name, pkg_type, old_package_info)
@@ -2350,24 +2298,22 @@ class PackageManager:
                         backup_path.unlink()
                 return {'success': True, 'message': f'Package "{package_name}" updated manually'}
             else:
-                self._restore_manual_backup(package_name, pkg_type, backup_path)
+                self._restore_backup(package_name, pkg_type, backup_path)
                 self.package_tracker.add_package(package_name, pkg_type, old_package_info)
                 return {'success': False, 'error': result.get('error', 'Manual update failed')}
         except Exception as e:
-            self._restore_manual_backup(package_name, pkg_type, backup_path)
+            self._restore_backup(package_name, pkg_type, backup_path)
             self.package_tracker.add_package(package_name, pkg_type, old_package_info)
             return {'success': False, 'error': str(e)}
 
-    def _restore_manual_backup(self, package_name, pkg_type, backup_path):
-        """Restore package from backup after failed update.
+    def _restore_backup(self, package_name, pkg_type, backup_path):
+        """Restore an installed package after an update stops or fails.
         
         Args:
             package_name: str - Package name to restore
             pkg_type: str - 'addon' or 'plugin'
             backup_path: str/Path - Path to backup directory
         
-        Returns:
-            bool - True if restore successful, False otherwise
         """
         if not backup_path:
             return
@@ -2555,10 +2501,16 @@ class PackageManager:
                                 pass
                 
                 if docs_base.exists():
-                    try:
-                        self._remove_directory_safe(docs_base)
-                    except OSError:
-                        pass
+                    # Only prune empty directories; shared or untracked docs stay put.
+                    directories = sorted(
+                        (path for path in docs_base.rglob('*') if path.is_dir()),
+                        key=lambda path: len(path.parts), reverse=True
+                    )
+                    for directory in directories + [docs_base]:
+                        try:
+                            directory.rmdir()
+                        except OSError:
+                            pass
             
             # Remove tracked resource files (only if no other package uses them)
             if 'resource_files' in package_info:

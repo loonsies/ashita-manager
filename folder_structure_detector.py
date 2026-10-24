@@ -9,6 +9,12 @@ class FolderStructureDetector:
     def __init__(self):
         """Initialize folder structure detector."""
         pass
+
+    @staticmethod
+    def _find_main_lua(folder, name):
+        """Find an addon's entrypoint regardless of filename capitalization."""
+        return next((file for file in folder.glob('*.lua')
+                     if file.stem.casefold() == name.casefold()), None)
     
     def detect_all_addons(self, source_path):
         """Detect all addons in a repository (for monorepos).
@@ -42,8 +48,8 @@ class FolderStructureDetector:
             for addon_dir in addons_folder.iterdir():
                 if addon_dir.is_dir() and addon_dir.name != 'libs':
                     # Check if main .lua file exists
-                    main_lua = addon_dir / f"{addon_dir.name}.lua"
-                    if main_lua.exists():
+                    main_lua = self._find_main_lua(addon_dir, addon_dir.name)
+                    if main_lua:
                         addons.append({
                             'found': True,
                             'name': addon_dir.name,
@@ -61,8 +67,8 @@ class FolderStructureDetector:
         for item in actual_source.iterdir():
             if item.is_dir() and not item.name.startswith('.'):
                 # Check if this directory has a matching lua file
-                main_lua = item / f"{item.name}.lua"
-                if main_lua.exists():
+                main_lua = self._find_main_lua(item, item.name)
+                if main_lua:
                     addons.append({
                         'found': True,
                         'name': item.name,
@@ -121,10 +127,11 @@ class FolderStructureDetector:
         if addons_folder.exists() and addons_folder.is_dir():
             # If target_name specified, look for that specific addon
             if target_name:
-                target_addon = addons_folder / target_name
-                if target_addon.is_dir():
-                    main_lua = target_addon / f"{target_name}.lua"
-                    if main_lua.exists():
+                target_addon = next((item for item in addons_folder.iterdir()
+                                     if item.is_dir() and item.name.casefold() == target_name.casefold()), None)
+                if target_addon:
+                    main_lua = self._find_main_lua(target_addon, target_name)
+                    if main_lua:
                         return {
                             'found': True,
                             'name': target_name,
@@ -136,8 +143,8 @@ class FolderStructureDetector:
                 for addon_dir in addons_folder.iterdir():
                     if addon_dir.is_dir() and addon_dir.name != 'libs':
                         # Check if main .lua file exists
-                        main_lua = addon_dir / f"{addon_dir.name}.lua"
-                        if main_lua.exists():
+                        main_lua = self._find_main_lua(addon_dir, addon_dir.name)
+                        if main_lua:
                             return {
                                 'found': True,
                                 'name': addon_dir.name,
@@ -169,10 +176,22 @@ class FolderStructureDetector:
                 }
         
         # Pattern 3: Single folder at root that contains the addon
+        if target_name:
+            for item in actual_source.iterdir():
+                if item.is_dir() and item.name.lower() == target_name.lower():
+                    main_lua = self._find_main_lua(item, item.name)
+                    if main_lua:
+                        return {
+                            'found': True,
+                            'name': item.name,
+                            'path': item,
+                            'structure': 'nested'
+                        }
+
         for item in actual_source.iterdir():
             if item.is_dir():
-                main_lua = item / f"{item.name}.lua"
-                if main_lua.exists():
+                main_lua = self._find_main_lua(item, item.name)
+                if main_lua:
                     return {
                         'found': True,
                         'name': item.name,
@@ -200,8 +219,10 @@ class FolderStructureDetector:
         # First, check if there's a single subdirectory
         # Exclude .git and other hidden folders from this check
         subdirs = [d for d in source_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
-        if len(subdirs) == 1:
-            # Check inside the single subdirectory
+        if (len(subdirs) == 1
+                and subdirs[0].name.lower() not in {'addons', 'plugins', 'docs', 'resources'}
+                and not any(source_path.glob('*.dll'))):
+            # Check inside a wrapper directory only when the root has no DLL.
             actual_source = subdirs[0]
         else:
             actual_source = source_path
